@@ -535,27 +535,29 @@ function GoldInput({ className = '', placeholder, type = 'text', inputMode, valu
 
 export function Login() {
   const navigate = useNavigate();
-  const { dispatch } = useAuth();
+  const { sendOtp } = useAuth();
   const [email, setEmail] = useState('');
   const [mobile, setMobile] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const fadeIn = createFadeIn();
-  const loading = createProgressBar(1200);
+  const [error, setError] = useState('');
 
   const canSend = email.trim().length > 0 && mobile.trim().replace(/\D/g, '').length >= 10;
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!canSend || isSending) {
-      return;
-    }
+    if (!canSend || isSending) return;
+    setIsSending(true);
+    setError('');
 
     const normalizedMobile = mobile.replace(/\D/g, '').slice(0, 10);
-    dispatch({ type: 'LOGIN', payload: { phoneNumber: normalizedMobile } });
-    setIsSending(true);
-    fadeIn.start();
-    loading.start(() => navigate(Routes.OTP, { replace: true }));
+    const response = await sendOtp({ mobileNumber: normalizedMobile, email, type: 'login' });
+
+    setIsSending(false);
+    if (response?.ok) {
+      navigate(Routes.OTP, { replace: true });
+    } else {
+      setError(response?.message || 'Failed to send OTP');
+    }
   };
 
   return (
@@ -617,6 +619,12 @@ export function Login() {
         Sign in with your registered email and mobile to continue your precious-metals journey
       </div>
 
+      {error && (
+        <div className="absolute left-1/2 top-[438px] w-[342px] -translate-x-1/2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 text-center">
+          {error}
+        </div>
+      )}
+
       <form onSubmit={handleLogin} className="absolute inset-0">
         <input
           value={email}
@@ -642,7 +650,7 @@ export function Login() {
           disabled={!canSend || isSending}
           className="absolute left-1/2 top-[635px] flex h-[60px] w-[342px] -translate-x-1/2 items-center justify-center rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[20px] font-medium text-black disabled:opacity-70"
         >
-          <span className="mr-3">Send OTP</span>
+          <span className="mr-3">{isSending ? 'Sending...' : 'Send OTP'}</span>
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M5 12H19M13 6L19 12L13 18" stroke="#000000" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -662,21 +670,19 @@ export function Login() {
       </div>
 
       <div className="absolute left-1/2 top-[791px] -translate-x-1/2 text-center text-[16px] font-medium leading-[19px] text-[#FFF6D9]">
-        New to Karatly? <span className="text-[#E8B438]">create account</span>
+        New to Karatly?{" "}
+        <button type="button" onClick={() => navigate(Routes.SIGNUP)} className="text-[#E8B438]">create account</button>
       </div>
-
-      {isSending && <AuthLoadingOverlay label="SENDING OTP" progress={loading.progress} />}
     </motion.div>
   );
 }
 
 export function OTP() {
   const navigate = useNavigate();
-  const { state, dispatch } = useAuth();
+  const { state, verifyOtp } = useAuth();
   const [digits, setDigits] = useState(['', '', '', '']);
   const [isVerifying, setIsVerifying] = useState(false);
-  const fadeIn = createFadeIn();
-  const loading = createProgressBar(1000);
+  const [sessionError, setSessionError] = useState('');
 
   const maskedPhone = state.phoneNumber
     ? `+91 ${state.phoneNumber.slice(0, 2)}*****${state.phoneNumber.slice(-2)}`
@@ -696,17 +702,33 @@ export function OTP() {
     }
   };
 
-  const handleVerify = () => {
-    if (isVerifying || digits.some((digit) => !digit)) {
-      return;
-    }
+  const handleVerify = async () => {
+    if (isVerifying || digits.some((digit) => !digit)) return;
 
     setIsVerifying(true);
-    fadeIn.start();
-    loading.start(() => {
-      dispatch({ type: 'VERIFY_OTP', payload: { user: { name: 'Karatly User', kycStatus: 'Verified' } } });
-      navigate(Routes.LOGIN, { replace: true });
+    setSessionError('');
+
+    const otp = digits.join('');
+    const response = await verifyOtp({
+      mobileNumber: state.phoneNumber || '',
+      otp,
+      email: state.email || '',
+      fullName: state.fullName || undefined,
+      dateOfBirth: state.dateOfBirth || undefined,
+      type: state.authType
     });
+
+    setIsVerifying(false);
+
+    if (response?.ok) {
+      if (state.authType === 'register') {
+        navigate(Routes.LOGIN, { replace: true });
+      } else {
+        navigate(Routes.DASHBOARD, { replace: true });
+      }
+    } else if (response?.code === 'SESSION_EXISTS') {
+      setSessionError(response.message || '');
+    }
   };
 
   return (
@@ -771,6 +793,12 @@ export function OTP() {
         {maskedPhone || '+91 98•••••10'}
       </div>
 
+      {sessionError && (
+        <div className="absolute left-1/2 top-[438px] w-[342px] -translate-x-1/2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300 text-center">
+          {sessionError}
+        </div>
+      )}
+
       <div className="absolute left-1/2 top-[471px] flex -translate-x-1/2 gap-[16px]">
         {digits.map((digit, index) => (
           <input
@@ -794,7 +822,10 @@ export function OTP() {
       </div>
 
       <div className="absolute left-1/2 top-[575px] -translate-x-1/2 text-center text-[16px] font-medium leading-[19px] text-[#9C9C9B]">
-        Didn&apos;t receive code? <span className="text-[#E8B438]">Resend</span>
+        Didn&apos;t receive code?{" "}
+        <button type="button" onClick={() => { setDigits(['', '', '', '']); setSessionError(''); }} className="text-[#E8B438]">
+          Resend
+        </button>
       </div>
 
       <button
@@ -803,7 +834,7 @@ export function OTP() {
         disabled={digits.some((digit) => !digit) || isVerifying}
         className="absolute left-[24px] top-[644px] flex h-[60px] w-[342px] items-center justify-center rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[20px] font-medium text-black disabled:opacity-70"
       >
-        <span>Verify &amp; Continue</span>
+        <span>{isVerifying ? 'Verifying...' : 'Verify & Continue'}</span>
         <svg className="ml-3" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M5 12H19M13 6L19 12L13 18" stroke="#000000" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -813,15 +844,15 @@ export function OTP() {
       <div className="absolute left-1/2 top-[736px] -translate-x-1/2 text-[16px] font-medium leading-[19px] text-[#7C7B79]">
         Change email or mobile
       </div>
-
-      {isVerifying && <AuthLoadingOverlay label="VERIFYING CODE" progress={loading.progress} />}
     </motion.div>
   );
 }
 
 export function Signup() {
   const navigate = useNavigate();
-  const { dispatch } = useAuth();
+  const { sendOtp } = useAuth();
+  const [isSending, setIsSending] = useState(false);
+  const [error, setError] = useState('');
   const [form, setForm] = useState({
     fullName: '',
     uniqueId: '',
@@ -840,11 +871,27 @@ export function Signup() {
     setForm((current) => ({ ...current, [field]: value }));
   };
   
-  const handleSignup = (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSending) return;
+    setIsSending(true);
+    setError('');
+
     const normalizedMobile = form.mobileNumber.replace(/\D/g, '').slice(0, 10);
-    dispatch({ type: 'LOGIN', payload: { phoneNumber: normalizedMobile || '9812345610' } });
-    navigate(Routes.OTP, { replace: true });
+    const response = await sendOtp({
+      mobileNumber: normalizedMobile,
+      email: form.email,
+      fullName: form.fullName,
+      dateOfBirth: form.dateOfBirth,
+      type: 'register'
+    });
+
+    setIsSending(false);
+    if (response?.ok) {
+      navigate(Routes.OTP, { replace: true });
+    } else {
+      setError(response?.message || 'Failed to send OTP');
+    }
   };
 
   return (
@@ -908,12 +955,17 @@ export function Signup() {
         grow your wealth in certified precious metals
       </div>
 
+      {error && (
+        <div className="absolute left-1/2 top-[438px] w-[342px] -translate-x-1/2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 text-center">
+          {error}
+        </div>
+      )}
+
       <div className="absolute left-[24px] top-[471px] h-[373px] w-[342px] overflow-hidden">
         <form onSubmit={handleSignup} className="h-full w-full">
           <div className="h-full w-full overflow-y-auto overscroll-contain no-scrollbar pb-6">
             <div className="grid w-full grid-cols-2 gap-x-[22px] gap-y-[16px]">
               <GoldInput placeholder="Full Name *" className="col-span-2 h-[50px] w-full" value={form.fullName} onChange={handleChange('fullName')} />
-              <GoldInput placeholder="Unique ID *" className="col-span-2 h-[50px] w-full" value={form.uniqueId} onChange={handleChange('uniqueId')} />
               <GoldInput placeholder="Mobile Number *" className="h-[50px] w-full" value={form.mobileNumber} onChange={handleChange('mobileNumber')} inputMode="numeric" type="tel" />
               <GoldInput placeholder="Date of Birth *" className="h-[50px] w-full" value={form.dateOfBirth} onChange={handleChange('dateOfBirth')} />
               <GoldInput placeholder="Email *" className="col-span-2 h-[50px] w-full" value={form.email} onChange={handleChange('email')} type="email" />
@@ -925,9 +977,10 @@ export function Signup() {
 
               <button
                 type="submit"
-                className="col-span-2 mt-[10px] flex h-[60px] w-full items-center justify-center rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[20px] font-medium text-black"
+                disabled={isSending}
+                className="col-span-2 mt-[10px] flex h-[60px] w-full items-center justify-center rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[20px] font-medium text-black disabled:opacity-70"
               >
-                <span className="mr-3">Send OTP</span>
+                <span className="mr-3">{isSending ? 'Sending...' : 'Send OTP'}</span>
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path d="M5 12H19M13 6L19 12L13 18" stroke="#000000" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>

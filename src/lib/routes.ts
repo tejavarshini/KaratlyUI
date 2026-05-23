@@ -36,6 +36,7 @@ export const Routes = {
   SIP_3: '/sip/3',
   SIP_4: '/sip/4',
   SIP_5: '/sip/5',
+  PORTFOLIO: '/portfolio',
   KYC_VERIFICATION: '/kyc-verification',
   PAYMENT_METHODS: '/payment-methods',
   REWARDS: '/rewards',

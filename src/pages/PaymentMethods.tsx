@@ -1,8 +1,16 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Bell, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Bell, Plus, Trash2, Pencil, Building2, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { Routes } from '../lib/routes';
+import { fetchAugmontUserBanks, createAugmontUserBank, updateAugmontUserBank, deleteAugmontUserBank, setPrimaryAugmontUserBank, getAugmontUser } from '../api/augmontApi';
+import { getUserProfile } from '../api/authApi';
+import { transbankValidateBankAccount } from '../api/transbankApi';
+import { useAuth } from '../store/AuthContext';
+import { useToast } from '@/hooks/use-toast';
+
+const MAX_BANKS = 3;
+const IFSC_REGEX = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
 function LockIcon() {
   return (
@@ -14,53 +22,192 @@ function LockIcon() {
   );
 }
 
-function BankIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect x="3" y="10" width="18" height="12" rx="1" stroke="#9E9E9E" strokeWidth="1.5" />
-      <path d="M3 10L12 3L21 10" stroke="#9E9E9E" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8 14H16" stroke="#9E9E9E" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
+function getBankId(bank: Record<string, unknown>): string {
+  return String(bank?.provider_bank_id || bank?.userBankId || bank?.bankId || bank?.id || '');
 }
 
-function MobileIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect x="6" y="2" width="12" height="20" rx="3" stroke="#9E9E9E" strokeWidth="1.5" />
-      <circle cx="12" cy="18" r="1" fill="#9E9E9E" />
-      <path d="M10 6H14" stroke="#9E9E9E" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
+function isValidAccountNumber(acc: string): boolean {
+  return /^\d{9,18}$/.test(acc.replace(/\s/g, ''));
 }
 
-function PlusIcon() {
-  return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 5V19" stroke="white" strokeWidth="2" strokeLinecap="round" />
-      <path d="M5 12H19" stroke="white" strokeWidth="2" strokeLinecap="round" />
-    </svg>
+function detectIfscMismatch(existingBanks: Array<Record<string, unknown>>, newAccountNumber: string, newIfsc: string): string | null {
+  const match = existingBanks.find(
+    (b) => String(b.accountNumber || '').replace(/\s/g, '') === String(newAccountNumber).replace(/\s/g, '')
   );
+  if (!match) return null;
+  const matchIfsc = String(match.ifscCode || match.ifsc_code || '').toUpperCase();
+  if (matchIfsc !== newIfsc.toUpperCase()) {
+    return `Account ${newAccountNumber} is already registered with IFSC ${matchIfsc}. Please verify the IFSC code.`;
+  }
+  return null;
 }
 
 export function PaymentMethods() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { toast } = useToast();
+  const { user } = useAuth();
 
-  const savedAccounts = [
-    {
-      icon: <BankIcon />,
-      name: 'HDFC BANK ** 4421',
-      type: 'Savings · IMPS Instant',
-      isDefault: true,
-    },
-    {
-      icon: <MobileIcon />,
-      name: 'hari@oksbi',
-      type: 'UPI · Instant Credit',
-      isDefault: false,
-    },
-  ];
+  const [banks, setBanks] = useState<Array<Record<string, unknown>>>([]);
+  const [banksLoading, setBanksLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editingBank, setEditingBank] = useState<Record<string, unknown> | null>(null);
+  const [formData, setFormData] = useState({ accountName: '', accountNumber: '', ifscCode: '' });
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+
+  const resolveUniqueId = useCallback(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    return augmontUser?.uniqueId || profile?.uniqueId || profile?.augmontUniqueId || '';
+  }, []);
+
+  const loadBanks = useCallback(async () => {
+    const uniqueId = resolveUniqueId();
+    if (!uniqueId) { setBanksLoading(false); return; }
+    const res = await fetchAugmontUserBanks(uniqueId);
+    if (res?.ok) {
+      setBanks(res.banks || []);
+    }
+    setBanksLoading(false);
+  }, [resolveUniqueId]);
+
+  useEffect(() => { loadBanks(); }, [loadBanks]);
+
+  const openAddForm = () => {
+    setEditingBank(null);
+    setFormData({ accountName: '', accountNumber: '', ifscCode: '' });
+    setFormErrors({});
+    setShowForm(true);
+  };
+
+  const openEditForm = (bank: Record<string, unknown>) => {
+    setEditingBank(bank);
+    setFormData({
+      accountName: String(bank.accountName || bank.account_holder_name || ''),
+      accountNumber: String(bank.accountNumber || bank.account_number || ''),
+      ifscCode: String(bank.ifscCode || bank.ifsc_code || ''),
+    });
+    setFormErrors({});
+    setShowForm(true);
+  };
+
+  const closeForm = () => {
+    setShowForm(false);
+    setEditingBank(null);
+    setFormData({ accountName: '', accountNumber: '', ifscCode: '' });
+    setFormErrors({});
+  };
+
+  const validate = (): boolean => {
+    const errors: Record<string, string> = {};
+    if (!formData.accountName.trim()) errors.accountName = 'Account holder name required';
+    if (!isValidAccountNumber(formData.accountNumber)) errors.accountNumber = 'Enter a valid account number (9-18 digits)';
+    if (!IFSC_REGEX.test(formData.ifscCode.toUpperCase())) errors.ifscCode = 'Enter a valid IFSC (e.g. SBIN0001234)';
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleSubmit = async () => {
+    if (!validate()) return;
+    setSubmitting(true);
+
+    const uniqueId = resolveUniqueId();
+    if (!uniqueId) {
+      toast({ variant: 'destructive', title: 'Error', description: 'User session not found. Please login again.' });
+      setSubmitting(false);
+      return;
+    }
+
+    const accountName = formData.accountName.trim();
+    const accountNumber = formData.accountNumber.replace(/\s/g, '');
+    const ifscCode = formData.ifscCode.toUpperCase();
+
+    if (!editingBank) {
+      const mismatch = detectIfscMismatch(banks, accountNumber, ifscCode);
+      if (mismatch) {
+        toast({ variant: 'destructive', title: 'Validation Error', description: mismatch });
+        setSubmitting(false);
+        return;
+      }
+    }
+
+    const validateRes = await transbankValidateBankAccount({ accountName, accountNumber, ifscCode });
+    if (!validateRes?.ok || validateRes?.isValid === false) {
+      toast({ variant: 'destructive', title: 'Validation Failed', description: validateRes?.message || 'Bank account validation failed. Please check your details.' });
+      setSubmitting(false);
+      return;
+    }
+
+    if (editingBank) {
+      const bankId = getBankId(editingBank);
+      const res = await updateAugmontUserBank({
+        uniqueId,
+        userBankId: bankId,
+        request: { accountNumber, accountName, ifscCode, status: 'active' },
+      });
+      if (res?.ok) {
+        toast({ title: 'Success', description: 'Bank account updated successfully.' });
+        closeForm();
+        loadBanks();
+      } else {
+        toast({ variant: 'destructive', title: 'Update Failed', description: res?.message || 'Failed to update bank account.' });
+      }
+    } else {
+      const res = await createAugmontUserBank({
+        uniqueId,
+        request: { accountNumber, accountName, ifscCode },
+      });
+      if (res?.ok) {
+        toast({ title: 'Success', description: 'Bank account added successfully.' });
+        closeForm();
+        const latestRes = await fetchAugmontUserBanks(uniqueId);
+        const latestBanks = latestRes?.ok ? (latestRes.banks || []) : banks;
+        setBanks(latestBanks);
+        const hasPrimary = latestBanks.some((b) => Boolean(b?.isPrimary || b?.is_primary));
+        if (!hasPrimary && latestBanks.length > 0) {
+          const firstBankId = getBankId(latestBanks[0]);
+          await setPrimaryAugmontUserBank({ uniqueId, userBankId: firstBankId }).catch(() => null);
+          loadBanks();
+        }
+      } else {
+        toast({ variant: 'destructive', title: 'Add Failed', description: res?.message || 'Failed to add bank account.' });
+      }
+    }
+    setSubmitting(false);
+  };
+
+  const handleDelete = async (bank: Record<string, unknown>) => {
+    const bankId = getBankId(bank);
+    const uniqueId = resolveUniqueId();
+    if (!uniqueId || !bankId) return;
+    const res = await deleteAugmontUserBank({ uniqueId, userBankId: bankId });
+    if (res?.ok) {
+      toast({ title: 'Deleted', description: 'Bank account removed.' });
+      loadBanks();
+    } else {
+      toast({ variant: 'destructive', title: 'Delete Failed', description: res?.message || 'Failed to delete bank account.' });
+    }
+  };
+
+  const handleSetPrimary = async (bank: Record<string, unknown>) => {
+    const bankId = getBankId(bank);
+    const uniqueId = resolveUniqueId();
+    if (!uniqueId || !bankId) return;
+    const res = await setPrimaryAugmontUserBank({ uniqueId, userBankId: bankId });
+    if (res?.ok) {
+      toast({ title: 'Updated', description: 'Primary bank account changed.' });
+      loadBanks();
+    } else {
+      toast({ variant: 'destructive', title: 'Failed', description: res?.message || 'Failed to set primary bank.' });
+    }
+  };
+
+  const maskAccount = (acc: string) => {
+    const cleaned = acc.replace(/\s/g, '');
+    if (cleaned.length < 4) return `****${cleaned}`;
+    return `****${cleaned.slice(-4)}`;
+  };
 
   return (
     <motion.div
@@ -73,7 +220,6 @@ export function PaymentMethods() {
       }}
     >
       <main className="mx-auto w-full max-w-[390px] pb-[110px]">
-        {/* Status Bar */}
         <section className="flex items-center justify-between px-6 pb-1 pt-[3px] text-[12px] leading-[18px] text-white">
           <span>9:30</span>
           <div className="flex items-center gap-2 text-white">
@@ -93,7 +239,6 @@ export function PaymentMethods() {
           </div>
         </section>
 
-        {/* Header */}
         <section className="flex items-center justify-between px-6 pt-10">
           <div className="flex items-center gap-2 text-[#F7CD57]">
             <button type="button" onClick={() => navigate(-1)} aria-label="Back" className="grid h-6 w-6 place-items-center">
@@ -101,7 +246,6 @@ export function PaymentMethods() {
             </button>
             <span className="text-[14px] font-normal leading-[21px]">Payment Methods</span>
           </div>
-
           <button
             type="button"
             aria-label="Notifications"
@@ -113,77 +257,182 @@ export function PaymentMethods() {
           </button>
         </section>
 
-        {/* Auto Debit Card */}
         <section className="mx-6 mt-6">
-          <div className="relative overflow-hidden rounded-[20px] bg-[linear-gradient(30.18deg,#1E2A28_64.48%,#6C5123_96.45%)] px-6 py-5">
-            <div className="text-[12px] leading-[14px] text-[#B4B0B0]">Auto Debit</div>
-            <div className="mt-1 text-[16px] font-bold leading-[19px] text-white">SIP via UPI Mandate</div>
-            <div className="mt-1 text-[12px] leading-[14px] text-[#B4B0B0]">Next charge ₹2,500 on 5 Jun · aarav@okhdfc</div>
-            <div className="mt-4 flex gap-3">
-              <button
-                type="button"
-                className="h-[30px] rounded-[5px] bg-[linear-gradient(90deg,#F7CD57_0%,#AA7702_100%)] px-4 text-[12px] font-semibold leading-[14px] text-black"
-              >
-                Manage Mandate
-              </button>
-              <button
-                type="button"
-                className="h-[30px] rounded-[5px] border border-[#4E4E4E] bg-[#0F1416] px-4 text-[12px] font-semibold leading-[14px] text-[#F7CD57]"
-              >
-                Pause
-              </button>
+          <h2 className="text-[14px] font-bold leading-[17px] text-[#BFBFBF]">SAVED BANK ACCOUNTS</h2>
+
+          {banksLoading ? (
+            <div className="mt-4 flex items-center justify-center py-8 text-[12px] text-[#7E7E7E]">Loading...</div>
+          ) : banks.length === 0 ? (
+            <div className="mt-4 rounded-[20px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-6 text-center text-[12px] text-[#7E7E7E]">
+              No bank accounts added yet
             </div>
-          </div>
-        </section>
+          ) : (
+            <div className="mt-3 space-y-3">
+              {banks.map((bank, i) => {
+                const bankId = getBankId(bank);
+                const isPrimary = Boolean(bank?.isPrimary || bank?.is_primary);
+                const accName = String(bank.accountName || bank.account_holder_name || 'Bank Account');
+                const accNum = String(bank.accountNumber || bank.account_number || '');
+                const ifsc = String(bank.ifscCode || bank.ifsc_code || '');
+                const bankName = String(bank.bankName || bank.bank_name || '');
 
-        {/* Saved Accounts */}
-        <section className="mx-6 mt-6">
-          <h2 className="text-[14px] font-bold leading-[17px] text-[#BFBFBF]">SAVED ACCOUNTS</h2>
-          <div className="mt-3 space-y-3">
-            {savedAccounts.map((account, index) => (
-              <div
-                key={index}
-                className="flex items-center rounded-[20px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-4"
-              >
-                <div className="grid h-10 w-10 place-items-center rounded-full bg-[#2A2923]">
-                  {account.icon}
-                </div>
-                <div className="ml-4 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[14px] font-medium leading-[21px] text-white">{account.name}</span>
-                    {account.isDefault && (
-                      <span className="rounded-[5px] bg-[#263938] px-3 py-1 text-[8px] font-semibold leading-[12px] text-[#F7CD57]">
-                        Default
-                      </span>
-                    )}
+                return (
+                  <div key={bankId || i} className="flex items-center rounded-[20px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-4">
+                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#2A2923]">
+                      <Building2 size={16} className="text-[#9E9E9E]" />
+                    </div>
+                    <div className="ml-4 min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-[14px] font-medium leading-[21px] text-white">{accName}</span>
+                        {isPrimary && (
+                          <span className="shrink-0 rounded-[5px] bg-[#263938] px-3 py-1 text-[8px] font-semibold leading-[12px] text-[#6DD6FF]">
+                            Primary
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-2 text-[10px] leading-[15px] text-[#7E7E7E]">
+                        <span className="font-mono">{maskAccount(accNum)}</span>
+                        <span>·</span>
+                        <span>{ifsc}</span>
+                        {bankName && <><span>·</span><span>{bankName}</span></>}
+                      </div>
+                    </div>
+                    <div className="ml-2 flex shrink-0 items-center gap-2">
+                      {!isPrimary && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetPrimary(bank)}
+                          className="grid h-8 w-8 place-items-center rounded-full bg-[#1A301E] text-[#15EE01]"
+                          title="Set as primary"
+                        >
+                          <CheckCircle2 size={14} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => openEditForm(bank)}
+                        className="grid h-8 w-8 place-items-center rounded-full bg-[#2A2923] text-[#7E7E7E]"
+                        title="Edit"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(bank)}
+                        className="grid h-8 w-8 place-items-center rounded-full bg-[#3D1A1A] text-[#FF4444]"
+                        title="Delete"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-1 text-[10px] leading-[15px] text-[#7E7E7E]">{account.type}</div>
-                </div>
-                {!account.isDefault && (
-                  <button type="button" aria-label="Delete" className="text-[#7E7E7E]">
-                    <Trash2 size={18} />
-                  </button>
-                )}
-              </div>
-            ))}
+                );
+              })}
+            </div>
+          )}
 
-            {/* Add new account */}
+          {!showForm && banks.length < MAX_BANKS && (
             <button
               type="button"
-              className="flex w-full items-center rounded-[20px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-4 text-left"
+              onClick={openAddForm}
+              className="mt-3 flex w-full items-center rounded-[20px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-4 text-left"
             >
-              <div className="grid h-10 w-10 place-items-center rounded-full bg-[#2A2923]">
-                <PlusIcon />
+              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#2A2923]">
+                <Plus size={20} className="text-white" />
               </div>
               <div className="ml-4 flex-1">
-                <div className="text-[14px] font-medium leading-[21px] text-white">Add new account</div>
-                <div className="mt-1 text-[10px] leading-[15px] text-[#7E7E7E]">Bank or UPI</div>
+                <div className="text-[14px] font-medium leading-[21px] text-white">Add bank account</div>
+                <div className="mt-1 text-[10px] leading-[15px] text-[#7E7E7E]">Savings or Current</div>
               </div>
+              <span className="text-[10px] text-[#7E7E7E]">{banks.length}/{MAX_BANKS}</span>
             </button>
-          </div>
+          )}
+
+          {showForm && (
+            <div className="mt-3 rounded-[20px] border border-[#B28A3B] bg-[#1A1710] px-4 py-5">
+              <h3 className="text-[14px] font-bold leading-[17px] text-white">
+                {editingBank ? 'Edit Bank Account' : 'Add Bank Account'}
+              </h3>
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-[10px] leading-[12px] text-[#7E7E7E]">Account Holder Name</label>
+                  <input
+                    type="text"
+                    value={formData.accountName}
+                    onChange={(e) => { setFormData({ ...formData, accountName: e.target.value }); setFormErrors({ ...formErrors, accountName: '' }); }}
+                    placeholder="Enter name as on bank account"
+                    className={`mt-1 h-10 w-full rounded-[10px] border bg-[#0F1416] px-3 text-[12px] text-white outline-none placeholder:text-[#4E4E4E] ${formErrors.accountName ? 'border-[#FF4444]' : 'border-[#2E2E2E]'}`}
+                  />
+                  {formErrors.accountName && <p className="mt-1 text-[10px] text-[#FF4444]">{formErrors.accountName}</p>}
+                </div>
+
+                <div>
+                  <label className="text-[10px] leading-[12px] text-[#7E7E7E]">Account Number</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={formData.accountNumber}
+                    onChange={(e) => { setFormData({ ...formData, accountNumber: e.target.value.replace(/\D/g, '') }); setFormErrors({ ...formErrors, accountNumber: '' }); }}
+                    placeholder="Enter 9-18 digit account number"
+                    maxLength={18}
+                    className={`mt-1 h-10 w-full rounded-[10px] border bg-[#0F1416] px-3 text-[12px] text-white outline-none placeholder:text-[#4E4E4E] ${formErrors.accountNumber ? 'border-[#FF4444]' : 'border-[#2E2E2E]'}`}
+                  />
+                  {formErrors.accountNumber && <p className="mt-1 text-[10px] text-[#FF4444]">{formErrors.accountNumber}</p>}
+                </div>
+
+                <div>
+                  <label className="text-[10px] leading-[12px] text-[#7E7E7E]">IFSC Code</label>
+                  <input
+                    type="text"
+                    value={formData.ifscCode}
+                    onChange={(e) => { setFormData({ ...formData, ifscCode: e.target.value.toUpperCase() }); setFormErrors({ ...formErrors, ifscCode: '' }); }}
+                    placeholder="e.g. SBIN0001234"
+                    maxLength={11}
+                    className={`mt-1 h-10 w-full rounded-[10px] border bg-[#0F1416] px-3 text-[12px] text-white outline-none placeholder:text-[#4E4E4E] ${formErrors.ifscCode ? 'border-[#FF4444]' : 'border-[#2E2E2E]'}`}
+                  />
+                  {formErrors.ifscCode && <p className="mt-1 text-[10px] text-[#FF4444]">{formErrors.ifscCode}</p>}
+                </div>
+
+                {!editingBank && formData.accountNumber && formData.ifscCode.length >= 4 && (() => {
+                  const warn = detectIfscMismatch(banks, formData.accountNumber, formData.ifscCode);
+                  return warn ? (
+                    <div className="flex items-start gap-2 rounded-[10px] border border-red-500/20 bg-red-500/10 px-3 py-2">
+                      <AlertCircle size={13} className="mt-0.5 shrink-0 text-red-400" />
+                      <span className="text-[10px] leading-[13px] text-red-300">{warn}</span>
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+
+              <div className="mt-5 flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeForm}
+                  className="h-10 flex-1 rounded-[15px] border border-[#2E2E2E] bg-[#0F1416] text-[12px] font-semibold text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={submitting}
+                  className="flex h-10 flex-1 items-center justify-center rounded-[15px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[12px] font-semibold text-black disabled:opacity-50"
+                >
+                  {submitting ? (
+                    <>
+                      <Loader2 size={14} className="mr-2 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    editingBank ? 'Update' : 'Add Account'
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
-        {/* Security notice */}
         <section className="mx-6 mt-6">
           <div className="flex items-center gap-2 rounded-[40px] border border-[#2E2E2E] bg-[#0F1416] px-4 py-2">
             <LockIcon />

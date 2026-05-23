@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Routes, AutoAdvanceDelays } from '../lib/routes';
@@ -12,27 +12,68 @@ import { LoadingScreen } from '../components/LoadingScreen';
 import { mockData } from '../data/mockData';
 import { transitions, variants, createGoldPulse, Easings, Duration, SpringConfigs } from '../lib/animations';
 import { ArrowLeft, Coins, Lock, ShieldCheck, Sparkles } from 'lucide-react';
+import { fetchLiveGoldRateSnapshot, getAugmontUser, createAugmontBuyOrder } from '../api/augmontApi';
+import { getUserProfile } from '../api/authApi';
+import { buildMobileDobUniqueId } from '../lib/uniqueId';
+import { useToast } from '@/hooks/use-toast';
+import { validateToken } from '../api/authApi';
+
+const NON_KYC_LIMIT = 5000;
 
 export function Buy1() {
   const navigate = useNavigate();
   const location = useLocation();
   const { state, dispatch } = useGoldFlow();
+  const { toast } = useToast();
   const activeGoldPulse = createGoldPulse();
-  const selectedPurity = (state.buyState.type || '24K') as keyof typeof mockData.goldPrices;
-  const amount = state.buyState.amount ?? 1000;
-  const pricePerGram = 7421.5;
-  const approxGrams = (amount / pricePerGram).toFixed(4);
-  const payableNow = amount + Math.round(amount * 0.03);
+  const liveRate = state.buyState.rate || 0;
+  const [rateLoading, setRateLoading] = useState(!liveRate);
   const [mode, setMode] = useState<'amount' | 'weight'>('amount');
+  const [amountInput, setAmountInput] = useState(String(state.buyState.amount ?? 1000));
+  const [weightInput, setWeightInput] = useState('1');
+  const [panVerified, setPanVerified] = useState(false);
+  const [showKycModal, setShowKycModal] = useState(false);
 
   useEffect(() => {
-    if (!state.buyState.type || !state.buyState.amount) {
-      dispatch({ type: 'SET_BUY_STATE', payload: { type: state.buyState.type || '24K', amount: amount || 1000 } });
-    }
-  }, [amount, dispatch, state.buyState.amount, state.buyState.type]);
+    validateToken().catch(() => {});
+    const profile = getUserProfile() || {};
+    setPanVerified(Boolean(profile?.panVerified));
+  }, []);
 
-  const locationState = location.state as { backgroundLocation?: typeof location } | null;
+  const parsedAmount = parseFloat(amountInput);
+  const parsedWeight = parseFloat(weightInput);
+  const pricePerGram = liveRate || 0;
+  const amount = mode === 'weight' ? (pricePerGram > 0 ? Math.round(parsedWeight * pricePerGram) : 0) : (isNaN(parsedAmount) ? 0 : parsedAmount);
+  const needsKyc = amount > NON_KYC_LIMIT && !panVerified;
+
+  const locationState = location.state as { backgroundLocation?: typeof location; metalType?: string } | null;
   const backgroundLocation = locationState?.backgroundLocation;
+  const metalType = locationState?.metalType || state.buyState.metalType || 'gold';
+
+  const isGold = metalType === 'gold';
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId = augmontUser?.uniqueId || profile?.uniqueId || profile?.augmontUniqueId || buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) || '';
+
+    dispatch({ type: 'SET_BUY_STATE', payload: { uniqueId, rate: 0, blockId: '', metalType } });
+
+    setRateLoading(true);
+    fetchLiveGoldRateSnapshot({ force: true }).then((res) => {
+      if (res?.ok) {
+        const buyPrice = metalType === 'silver' ? (res.snapshot?.silver?.buyPrice || 0) : (res.snapshot?.buyPrice || 0);
+        if (buyPrice > 0) {
+          dispatch({ type: 'SET_BUY_STATE', payload: { rate: buyPrice, blockId: res.blockId || res.snapshot.blockId || '' } });
+        }
+      }
+    }).finally(() => setRateLoading(false));
+  }, [metalType]);
+
+  const approxGrams = pricePerGram > 0 ? (amount / pricePerGram).toFixed(4) : '0';
+  const payableNow = amount + Math.round(amount * 0.03);
 
   return (
     <motion.div
@@ -60,7 +101,7 @@ export function Buy1() {
               <ArrowLeft size={24} strokeWidth={1.8} />
             </button>
 
-            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Buy Gold</h1>
+            <h1 className="text-[16px] font-semibold leading-[24px] text-white">{isGold ? 'Buy Gold' : 'Buy Silver'}</h1>
 
             <div className="absolute right-0 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full bg-[#3B3935] text-[#15EE01]">
               <ShieldCheck size={12} strokeWidth={2.4} />
@@ -77,17 +118,17 @@ export function Buy1() {
             <section className="rounded-[10px] border border-[#E8B438] bg-[linear-gradient(244.67deg,#6C5123_0%,#1E2A28_44.59%)] px-5 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-[12px] leading-[18px] text-[#A1A1A1]">24K · 999.9 Pure</div>
+                  <div className="text-[12px] leading-[18px] text-[#A1A1A1]">{isGold ? '24K · 999.9 Pure' : '99.9% Pure Silver'}</div>
                   <motion.div
                     animate={activeGoldPulse.animate}
                     transition={activeGoldPulse.transition}
                     className="mt-1 text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent"
                   >
-                    ₹7,421.5/g
+                    {rateLoading ? 'Loading...' : pricePerGram > 0 ? `₹${pricePerGram.toLocaleString('en-IN')}/g` : 'Unavailable'}
                   </motion.div>
                   <div className="mt-1 flex items-center gap-1 text-[10px] leading-[15px] text-[#0EA300]">
                     <Sparkles size={12} strokeWidth={1.9} />
-                    <span>Live · refreshed 2s ago</span>
+                    <span>{rateLoading ? 'Fetching live rate...' : 'Live · from Augmont'}</span>
                   </div>
                 </div>
 
@@ -134,22 +175,41 @@ export function Buy1() {
               </div>
             </section>
 
+            {needsKyc && (
+              <div className="mt-2 rounded-[10px] border border-[#E8B438]/30 bg-[#E8B438]/10 px-4 py-3 flex items-start justify-between gap-3">
+                <span className="text-[10px] leading-[14px] text-[#F7CD57]/80">⚠ Non-KYC users are limited to ₹5,000 per financial year. Complete KYC to unlock higher limits.</span>
+                <button type="button" onClick={() => navigate(Routes.KYC_VERIFICATION)}
+                  className="shrink-0 rounded-[6px] bg-[#E8B438]/20 px-3 py-1 text-[10px] font-semibold text-[#F7CD57] hover:bg-[#E8B438]/30 transition">Complete KYC →</button>
+              </div>
+            )}
             <section className="mt-2 rounded-[20px] border border-[#4E4E4E] bg-[#21211A] px-4 py-3">
               <div className="text-center text-[12px] font-medium leading-[18px] text-[#7E7E7E]">YOU PAY</div>
-              <div className="mx-auto mt-4 flex h-[40px] w-[200px] items-center justify-center rounded-[20px] border border-[#5E5E5E] bg-[#37372E] text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
-                ₹ {amount.toLocaleString('en-IN')}
+              <div className="mx-auto mt-4 flex h-[40px] w-[200px] items-center justify-center rounded-[20px] border border-[#5E5E5E] bg-[#37372E]">
+                {mode === 'weight' ? (
+                  <input type="number" inputMode="decimal" step="0.0001" min="0" value={weightInput}
+                    onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setWeightInput(v); }}
+                    className="w-[100px] bg-transparent text-right text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent outline-none" />
+                ) : (
+                  <input type="number" inputMode="numeric" min="0" step="100" value={amountInput}
+                    onChange={(e) => { const v = e.target.value; if (/^\d*\.?\d*$/.test(v)) setAmountInput(v); }}
+                    className="w-[130px] bg-transparent text-right text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent outline-none" />
+                )}
+                <span className="ml-1 text-[24px] font-semibold leading-[36px] text-[#BCBCBC]">{mode === 'weight' ? 'g' : ''}</span>
               </div>
-              <div className="mt-4 text-center text-[10px] leading-[15px] text-[#7E7E7E]">≈ {approxGrams} g</div>
+              <div className="mt-4 text-center text-[10px] leading-[15px] text-[#7E7E7E]">
+                {mode === 'weight' ? `≈ ₹${amount.toLocaleString('en-IN')}` : `≈ ${approxGrams} g`} {rateLoading ? '(loading rate...)' : ''}
+              </div>
 
               <div className="mt-6 grid grid-cols-4 gap-2">
-                {[500, 1000, 5000, 10000].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => dispatch({ type: 'SET_BUY_STATE', payload: { amount: preset } })}
-                    className={`h-[30px] rounded-[20px] border px-3 text-[12px] leading-[18px] ${amount === preset ? 'border-[#5E5E5E] bg-[#262521] text-white' : 'border-[#4E4E4E] bg-[#262521] text-white'}`}
+                {(mode === 'weight' ? [0.5, 1, 2, 5] : [500, 1000, 5000, 10000]).map((preset) => (
+                  <button key={preset} type="button"
+                    onClick={() => {
+                      if (mode === 'weight') setWeightInput(String(preset));
+                      else setAmountInput(String(preset));
+                    }}
+                    className={`h-[30px] rounded-[20px] border px-3 text-[12px] leading-[18px] ${(mode === 'weight' ? weightInput === String(preset) : amountInput === String(preset)) ? 'border-[#5E5E5E] bg-[#262521] text-white' : 'border-[#4E4E4E] bg-[#262521] text-white'}`}
                   >
-                    ₹{preset}
+                    {mode === 'weight' ? `${preset}g` : `₹${preset}`}
                   </button>
                 ))}
               </div>
@@ -164,7 +224,7 @@ export function Buy1() {
 
           <div className="mt-1 shrink-0">
             <div className="relative rounded-[20px] border border-[#2E2E2E] bg-[#19160F] px-5 py-4">
-              <div className="text-[10px] leading-[15px] text-[#9E9E9E]">Payable now</div>
+              <div className="text-[10px] leading-[15px] text-[#9E9E9E]">Payable now (incl. GST)</div>
               <div className="absolute right-5 top-1/2 -translate-y-1/2 text-[16px] font-semibold leading-[24px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
                 ₹ {payableNow.toLocaleString('en-IN')}
               </div>
@@ -174,16 +234,53 @@ export function Buy1() {
               <div className="absolute left-[-25px] top-1/2 h-[60px] w-[20px] -translate-y-1/2 rounded-full bg-white/60 blur-[16.5px]" />
               <motion.button
                 type="button"
-                onClick={() => navigate(Routes.BUY_2, { state: { backgroundLocation } })}
+                onClick={() => {
+                  dispatch({ type: 'SET_BUY_STATE', payload: { amount } });
+                  if (needsKyc) { setShowKycModal(true); return; }
+                  navigate(Routes.BUY_2, { state: { backgroundLocation } });
+                }}
+                disabled={rateLoading || pricePerGram <= 0}
                 whileTap={{ scale: 0.98, transition: SpringConfigs.buttonPress }}
-                className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black"
+                className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black disabled:opacity-50"
               >
-                Continue →
+                {rateLoading ? 'Loading rate...' : pricePerGram <= 0 ? 'Rate unavailable' : 'Continue →'}
               </motion.button>
             </div>
           </div>
         </div>
       </motion.section>
+
+      {showKycModal && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-[rgba(0,0,0,0.6)] px-6 backdrop-blur-[6px]"
+          onClick={() => setShowKycModal(false)}>
+          <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+            transition={{ duration: 0.2 }}
+            className="w-full max-w-[340px] rounded-[20px] border border-[#E8B438] bg-[#1A1710] px-6 pb-6 pt-8 text-center shadow-[0_0_40px_rgba(0,0,0,0.5)]"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="mx-auto grid h-[72px] w-[72px] place-items-center rounded-full bg-[linear-gradient(180deg,#FBBF42_0%,#E59700_100%)]">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 3L4 7V12C4 17.3 7.6 22 12 23C16.4 22 20 17.3 20 12V7L12 3Z" fill="black" />
+                <path d="M9 12L11.5 14.5L16 10" stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <h2 className="mt-4 text-[18px] font-bold text-white">KYC Verification Required</h2>
+            <p className="mt-2 text-[12px] leading-[16px] text-[#9E9E9E]">
+              Purchases above ₹5,000 require KYC verification. Complete your KYC to unlock higher limits up to ₹5,00,000.
+            </p>
+            <div className="mt-6 space-y-3">
+              <button type="button" onClick={() => { setShowKycModal(false); navigate(Routes.KYC_VERIFICATION); }}
+                className="h-11 w-full rounded-[12px] bg-[linear-gradient(90deg,#FED75D_0%,#ECB000_50.48%,#D48D00_100%)] text-[14px] font-bold text-black">
+                Complete KYC →
+              </button>
+              <button type="button" onClick={() => setShowKycModal(false)}
+                className="h-11 w-full rounded-[12px] border border-[#4E4E4E] bg-transparent text-[12px] text-[#9E9E9E]">
+                Maybe later
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
     </motion.div>
   );
 }
@@ -209,13 +306,18 @@ function FeatureChip({ icon, label }: { icon: React.ReactNode; label: string }) 
 export function Buy2() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { state } = useGoldFlow();
+  const { state, dispatch } = useGoldFlow();
   const amount = state.buyState.amount ?? 1000;
-  const pricePerGram = 7421.5;
-  const quantity = (amount / pricePerGram).toFixed(4);
-  const subtotal = amount;
-  const gst = Math.round(amount * 0.03);
-  const total = subtotal + gst;
+  const pricePerGram = state.buyState.rate || 0;
+  const preTax = amount / 1.03;
+  const gstAmt = amount - preTax;
+  const quantity = pricePerGram > 0 ? (preTax / pricePerGram).toFixed(4) : '0';
+  const total = amount;
+
+  useEffect(() => {
+    dispatch({ type: 'SET_BUY_STATE', payload: { preTax, gst: gstAmt, grams: Number(quantity) } });
+  }, [preTax, gstAmt, quantity, dispatch]);
+
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
 
@@ -273,23 +375,23 @@ export function Buy2() {
             <section className="mt-4 rounded-[30px] border border-[#444135] bg-[#191812] px-6 py-6">
               <div className="space-y-4 text-[14px] text-[#8D8B87]">
                 <div className="flex items-center justify-between">
-                  <span>Gold Price</span>
-                  <span className="font-semibold text-white">₹{pricePerGram.toLocaleString('en-IN')}/g</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Quantity</span>
-                  <span className="font-semibold text-white">{quantity} g</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Sub total</span>
-                  <span className="font-semibold text-white">₹{subtotal.toLocaleString('en-IN')}</span>
+                  <span>Pre-tax amount</span>
+                  <span className="font-semibold text-white">₹{preTax.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>GST (3%)</span>
-                  <span className="font-semibold text-white">₹{gst.toLocaleString('en-IN')}</span>
+                  <span className="font-semibold text-white">₹{gstAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
-                <div className="flex items-center justify-between border-t border-[#33312A] pt-4 text-[18px] font-semibold">
-                  <span className="text-white">Total Payable</span>
+                <div className="flex items-center justify-between">
+                  <span>Buy rate</span>
+                  <span className="font-semibold text-white">{pricePerGram > 0 ? `₹${pricePerGram.toLocaleString('en-IN')}/g` : 'Unavailable'}</span>
+                </div>
+                <div className="flex items-center justify-between border-t border-[#33312A] pt-4 text-[16px] font-semibold">
+                  <span className="text-white">You get</span>
+                  <span className="text-[#F7CD57]">{quantity} g</span>
+                </div>
+                <div className="flex items-center justify-between text-[18px] font-semibold">
+                  <span className="text-white">Total paid</span>
                   <span className="text-[#F7CD57]">₹{total.toLocaleString('en-IN')}</span>
                 </div>
               </div>
@@ -330,7 +432,7 @@ export function Buy3() {
   const location = useLocation();
   const { state } = useGoldFlow();
   const amount = state.buyState.amount ?? 1000;
-  const total = amount + Math.round(amount * 0.03);
+  const total = amount;
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
   const paymentMethods: Array<{ title: string; subtitle: string; active: boolean; badge?: string; icon: string }> = [
@@ -383,8 +485,8 @@ export function Buy3() {
             <section className="mt-2 rounded-[20px] border border-[#3E3522] bg-[#201B0F] px-5 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-[12px] font-medium leading-[18px] text-[#7E7E7E]">TOTAL PAYABLE</div>
-                  <div className="mt-1 text-[32px] font-bold leading-[48px] text-[#F8CF59]">₹{total.toLocaleString('en-IN')}.00</div>
+                  <div className="text-[12px] font-medium leading-[18px] text-[#7E7E7E]">TOTAL PAYABLE (incl. GST)</div>
+                  <div className="mt-1 text-[32px] font-bold leading-[48px] text-[#F8CF59]">₹{total.toLocaleString('en-IN')}</div>
                 </div>
                 <div className="rounded-[30px] bg-[#1A301E] px-5 py-2 text-[12px] font-semibold text-[#15EE01]">Secure</div>
               </div>
@@ -431,7 +533,7 @@ export function Buy3() {
                 whileTap={{ scale: 0.98, transition: SpringConfigs.buttonPress }}
                 className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black"
               >
-                Pay ₹{total.toLocaleString('en-IN')}.00 →
+                Pay ₹{total.toLocaleString('en-IN')} →
               </motion.button>
             </div>
           </div>
@@ -444,16 +546,80 @@ export function Buy3() {
 export function Buy4() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { state } = useGoldFlow();
-  const amount = state.buyState.amount ?? 1000;
-  const total = amount + Math.round(amount * 0.03);
+  const { state, dispatch } = useGoldFlow();
+  const { toast } = useToast();
+  const amount = state.buyState.amount ?? 0;
+  const rate = state.buyState.rate || 0;
+  const blockId = state.buyState.blockId || '';
+  const metalType = state.buyState.metalType || 'gold';
+  const profile = getUserProfile() || {};
+  const augmontUser = getAugmontUser() || {};
+  const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+  const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+  const uniqueId = state.buyState.uniqueId || augmontUser?.uniqueId || profile?.uniqueId || profile?.augmontUniqueId || buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) || '';
+  const [statusMsg, setStatusMsg] = useState('Validating session...');
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
 
   useEffect(() => {
-    const timer = setTimeout(() => navigate(Routes.BUY_5, { replace: true, state: { backgroundLocation } }), AutoAdvanceDelays.BUY_4);
-    return () => clearTimeout(timer);
-  }, [backgroundLocation, navigate]);
+    let cancelled = false;
+    const placeOrder = async () => {
+      const missing = [];
+      if (!amount) missing.push('amount');
+      if (!rate) missing.push('rate');
+      if (!uniqueId) missing.push('uniqueId');
+      if (missing.length > 0) {
+        toast({ variant: 'destructive', title: 'Error', description: `Missing: ${missing.join(', ')}. Please start again.` });
+        navigate(backgroundLocation?.pathname || Routes.DASHBOARD, { replace: true });
+        return;
+      }
+
+      setStatusMsg('Fetching live rate...');
+      const rateRes = await fetchLiveGoldRateSnapshot({ force: true });
+      if (cancelled) return;
+      const liveRate = metalType === 'silver'
+        ? (rateRes?.snapshot?.silver?.buyPrice || rateRes?.snapshot?.silver?.currentPrice || 0)
+        : (rateRes?.snapshot?.buyPrice || 0);
+      if (!rateRes?.ok || !liveRate) {
+        toast({ variant: 'destructive', title: 'Rate Error', description: rateRes?.message || 'Failed to fetch live rate.' });
+        navigate(Routes.BUY_1, { replace: true, state: { backgroundLocation } });
+        return;
+      }
+      const liveBlockId = rateRes.blockId || rateRes.snapshot.blockId || '';
+      dispatch({ type: 'SET_BUY_STATE', payload: { rate: liveRate, blockId: liveBlockId } });
+
+      setStatusMsg('Placing buy order...');
+      const merchantTransactionId = `KTL-BUY-${Date.now()}`;
+      const res = await createAugmontBuyOrder({
+        request: {
+          merchantTransactionId,
+          uniqueId,
+          lockPrice: liveRate.toFixed(2),
+          metalType,
+          amount: amount.toFixed(2),
+          modeOfPayment: 'wallet',
+          blockId: liveBlockId
+        }
+      });
+
+      if (cancelled) return;
+
+      if (res?.ok) {
+        const orderResult = {
+          transactionId: (res?.order as Record<string, unknown>)?.transactionId as string || merchantTransactionId,
+          merchantTransactionId,
+        };
+        dispatch({ type: 'SET_BUY_STATE', payload: orderResult });
+        navigate(Routes.BUY_5, { replace: true, state: { backgroundLocation } });
+      } else {
+        toast({ variant: 'destructive', title: 'Order Failed', description: res?.message || 'Unable to place buy order.' });
+        navigate(backgroundLocation?.pathname || Routes.DASHBOARD, { replace: true });
+      }
+    };
+
+    placeOrder();
+    return () => { cancelled = true; };
+  }, []);
 
   return (
     <motion.div
@@ -495,10 +661,10 @@ export function Buy4() {
           </div>
 
           <div className="flex flex-col items-center justify-center py-12">
-            <LoadingScreen text="Payment Processing" />
+            <LoadingScreen text={statusMsg} />
           </div>
 
-          <div className="pb-1 text-center text-[12px] leading-[18px] text-[#7E7E7E]">Securing your gold in the vault...</div>
+          <div className="pb-1 text-center text-[12px] leading-[18px] text-[#7E7E7E]">{statusMsg}</div>
         </div>
       </motion.section>
     </motion.div>
@@ -509,6 +675,10 @@ export function Buy5() {
   const navigate = useNavigate();
   const location = useLocation();
   const { state, dispatch } = useGoldFlow();
+  const amount = state.buyState.amount ?? 0;
+  const rate = state.buyState.rate || 0;
+  const grams = state.buyState.grams || 0;
+  const transactionId = state.buyState.transactionId || '';
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
 
@@ -561,22 +731,26 @@ export function Buy5() {
                 </div>
               </div>
               <div className="text-[16px] font-semibold text-white">Payment Successful</div>
-              <div className="mt-2 text-[12px] leading-[18px] text-[#7E7E7E]">0.1347g of 24K gold added to your vault</div>
+              <div className="mt-2 text-[12px] leading-[18px] text-[#7E7E7E]">{grams ? `${grams.toFixed(4)}g` : ''} of 24K gold added to your vault</div>
             </section>
 
             <section className="mt-4 rounded-[30px] border border-[#444135] bg-[#191812] px-6 py-6">
               <div className="space-y-4 text-[14px] text-[#8D8B87]">
                 <div className="flex items-center justify-between">
                   <span>Amount paid</span>
-                  <span className="font-semibold text-white">₹{((state.buyState.amount ?? 1000) + Math.round((state.buyState.amount ?? 1000) * 0.03)).toLocaleString('en-IN')}</span>
+                  <span className="font-semibold text-white">₹{amount.toLocaleString('en-IN')}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Gold Purchased</span>
-                  <span className="font-semibold text-white">{((state.buyState.amount ?? 1000) / 7421.5).toFixed(4)} g</span>
+                  <span className="font-semibold text-white">{grams ? `${grams.toFixed(4)} g` : '---'}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Rate</span>
+                  <span className="font-semibold text-white">{rate > 0 ? `₹${rate.toLocaleString('en-IN')}/g` : '---'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Order ID</span>
-                  <span className="font-semibold text-white">#AUR-8421906</span>
+                  <span className="font-semibold text-white">#{transactionId ? transactionId.slice(0, 12) : '---'}</span>
                 </div>
                 <div className="flex items-center justify-between border-t border-[#33312A] pt-4 text-[18px] font-semibold">
                   <span className="text-white">Status</span>

@@ -1,9 +1,50 @@
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 
 interface GoldFlowState {
-  buyState: { type?: string; amount?: number; brand?: string; address?: string; paymentMethod?: string; };
-  sellState: { portfolioItemId?: string; amount?: number; bankAccount?: string; };
-  sipState: { amount?: number; frequency?: string; date?: number; type?: string; brand?: string; };
+  buyState: {
+    type?: string;
+    amount?: number;
+    rate?: number;
+    blockId?: string;
+    uniqueId?: string;
+    grams?: number;
+    preTax?: number;
+    gst?: number;
+    brand?: string;
+    address?: string;
+    paymentMethod?: string;
+    transactionId?: string;
+    merchantTransactionId?: string;
+    metalType?: string;
+  };
+  sellState: {
+    amount?: number;
+    rate?: number;
+    blockId?: string;
+    uniqueId?: string;
+    grams?: number;
+    payout?: number;
+    platformFee?: number;
+    userBankId?: string;
+    bankName?: string;
+    transactionId?: string;
+    merchantTransactionId?: string;
+    metalType?: string;
+  };
+  sipState: {
+    amount?: number;
+    rate?: number;
+    blockId?: string;
+    uniqueId?: string;
+    metalType?: string;
+    frequency?: string;
+    date?: number;
+    cycles?: number;
+    type?: string;
+    brand?: string;
+    transactionId?: string;
+    merchantTransactionId?: string;
+  };
 }
 
 type GoldFlowAction = 

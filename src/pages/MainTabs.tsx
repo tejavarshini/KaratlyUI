@@ -1,4 +1,4 @@
-﻿import React from 'react';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell,
@@ -30,23 +30,175 @@ import { useCart } from '../store/CartContext';
 import { TopBar } from '../components/TopBar';
 import { BrandCard } from '../components/BrandCard';
 import { CategoryCard } from '../components/CategoryCard';
+import { fetchLiveGoldRateSnapshot, fetchAugmontRateHistory, fetchAugmontBuyOrders, fetchAugmontSellOrders, getAugmontUser, fetchAugmontPassbook } from '../api/augmontApi';
+import { getUserProfile } from '../api/authApi';
+import { buildMobileDobUniqueId } from '../lib/uniqueId';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+const currencyFormatter = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  maximumFractionDigits: 0
+});
+
+const getDateRange = () => {
+  const toDate = new Date();
+  const fromDate = new Date();
+  fromDate.setDate(toDate.getDate() - 20);
+  return {
+    fromDate: fromDate.toISOString().slice(0, 10),
+    toDate: toDate.toISOString().slice(0, 10)
+  };
+};
 
 export function Home() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [metalType, setMetalType] = useState("gold");
+  const [chartData, setChartData] = useState<Array<{ date: string; buyRate: number; sellRate: number; label: string; price: number }>>([]);
+  const [liveRates, setLiveRates] = useState({
+    gold: { currentPrice: 0, buyPrice: 0, sellPrice: 0 },
+    silver: { currentPrice: 0, buyPrice: 0, sellPrice: 0 },
+    updatedAt: ""
+  });
+  const [isLoading, setIsLoading] = useState(true);
+  const [goldBalance, setGoldBalance] = useState(0);
+  const [totalInvested, setTotalInvested] = useState(0);
+
+  const loadRates = useCallback(async ({ forceRates = false } = {}) => {
+    setIsLoading(true);
+    const { fromDate, toDate } = getDateRange();
+    const [liveResponse, historyResponse] = await Promise.all([
+      fetchLiveGoldRateSnapshot({ force: forceRates }),
+      fetchAugmontRateHistory({ fromDate, toDate, metalType, force: forceRates })
+    ]);
+
+    if (liveResponse?.ok) {
+      setLiveRates(liveResponse.snapshot);
+    }
+
+    if (historyResponse?.ok) {
+      setChartData(historyResponse.history || []);
+    }
+
+    setIsLoading(false);
+  }, [metalType]);
+
+  useEffect(() => {
+    loadRates();
+    const intervalId = window.setInterval(() => loadRates({ forceRates: true }), 30000);
+    return () => window.clearInterval(intervalId);
+  }, [loadRates]);
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId =
+      augmontUser?.uniqueId ||
+      profile?.uniqueId ||
+      profile?.augmontUniqueId ||
+      buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) ||
+      '';
+    if (!uniqueId) return;
+    Promise.all([
+      fetchAugmontPassbook(uniqueId),
+      fetchAugmontBuyOrders({ uniqueId }),
+    ]).then(([passbookRes, buyRes]) => {
+      if (passbookRes?.ok) {
+        const pb = (passbookRes.passbook || {}) as Record<string, unknown>;
+        setGoldBalance(Number(pb.goldGrms || pb.goldBalance || pb.balance || 0));
+      }
+      if (buyRes?.ok) {
+        const total = (buyRes.orders || []).reduce((s: number, o: Record<string, unknown>) => s + Number(o.amount || 0), 0);
+        setTotalInvested(total);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const metalLabel = metalType === 'gold' ? 'Gold' : 'Silver';
   const quickActions = [
-    { label: 'Buy Gold', icon: 'cart', bg: 'bg-[#3D3214]', fg: 'text-[#F7CD57]' },
-    { label: 'Sell Gold', icon: 'wallet', bg: 'bg-[#233737]', fg: 'text-[#6DD6FF]' },
+    { label: `Buy ${metalLabel}`, icon: 'cart', bg: 'bg-[#3D3214]', fg: 'text-[#F7CD57]' },
+    { label: `Sell ${metalLabel}`, icon: 'wallet', bg: 'bg-[#233737]', fg: 'text-[#6DD6FF]' },
     { label: 'SIP', icon: 'swap', bg: 'bg-[#3D3214]', fg: 'text-[#F7CD57]' },
     { label: 'History', icon: 'history', bg: 'bg-[#233737]', fg: 'text-[#6DD6FF]' },
   ] as const;
 
-  const transactions = [
-    { title: 'Gold', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', type: 'BUY', tone: 'gold', icon: '↙' },
-    { title: 'Gold', amount: '₹3,250', meta: '42.0g · ₹77.4/g · Yesterday · 11:18 AM', status: 'Completed', type: 'SELL', tone: 'teal', icon: '↗' },
-    { title: 'Gold (SIP)', amount: '₹5,000', meta: '0.33g · ₹15,082/g · May 06 · 9:00 AM', status: 'Completed', type: 'BUY', tone: 'gold', icon: '⇆' },
-    { title: 'Gold', amount: '₹25,000', meta: '1.65g · ₹15,150/g · May 04 · 2:14 PM', status: 'Pending', type: 'BUY', tone: 'gold', icon: '↙' },
-  ] as const;
+  const selectedLiveRates = liveRates?.[metalType] || {};
+
+  const priceChange = React.useMemo(() => {
+    if (chartData.length < 2) return 0;
+    const first = chartData[0]?.price || 0;
+    const last = chartData[chartData.length - 1]?.price || 0;
+    if (!first) return 0;
+    return ((last - first) / first) * 100;
+  }, [chartData]);
+
+  const latestLabel = chartData.length > 0 ? chartData[chartData.length - 1]?.label || "" : "";
+  const latestPrice = chartData.length > 0 ? chartData[chartData.length - 1]?.price || 0 : 0;
+
+  const goldBuyPrice = liveRates?.gold?.buyPrice || 0;
+  const goldSellPrice = liveRates?.gold?.sellPrice || 0;
+  const silverBuyPrice = liveRates?.silver?.buyPrice || 0;
+  const silverSellPrice = liveRates?.silver?.sellPrice || 0;
+  const portfolioValue = goldBalance * goldBuyPrice;
+  const profit = portfolioValue - totalInvested;
+  const profitPercent = totalInvested > 0 ? ((profit / totalInvested) * 100).toFixed(2) : '0.00';
+
+  const buyPoints = chartData.map((d, i) => {
+    const maxPrice = Math.max(...chartData.map(p => p.buyRate || p.price || 0), 1);
+    const pct = ((d.buyRate || d.price || 0) / maxPrice) * 80;
+    const x = Math.round((i / Math.max(chartData.length - 1, 1)) * 270 + 8);
+    const y = Math.round(88 - pct);
+    return `${x},${y}`;
+  }).join(' ');
+
+  const [orders, setOrders] = useState<Array<Record<string, unknown>>>([]);
+  const [orderFilter, setOrderFilter] = useState('all');
+  const [ordersLoading, setOrdersLoading] = useState(false);
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId =
+      augmontUser?.uniqueId ||
+      profile?.uniqueId ||
+      profile?.augmontUniqueId ||
+      buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) ||
+      '';
+
+    if (!uniqueId) return;
+
+    setOrdersLoading(true);
+    Promise.all([
+      fetchAugmontBuyOrders({ uniqueId }),
+      fetchAugmontSellOrders({ uniqueId }),
+    ]).then(([buyRes, sellRes]) => {
+      const buys = (buyRes?.orders || []).map((o: Record<string, unknown>) => ({ ...o, type: 'BUY' }));
+      const sells = (sellRes?.orders || []).map((o: Record<string, unknown>) => ({ ...o, type: 'SELL' }));
+      const all = [...buys, ...sells].sort(
+        (a, b) => new Date(String(b.date || 0)).getTime() - new Date(String(a.date || 0)).getTime()
+      );
+      setOrders(all);
+    }).finally(() => setOrdersLoading(false));
+  }, []);
+
+  const filteredOrders = orderFilter === 'all'
+    ? orders
+    : orders.filter((o) => String(o.type || '').toLowerCase() === orderFilter);
+
+  const formatOrderDate = (dateStr: string) => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    if (isToday) return `Today · ${time}`;
+    return `${d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} · ${time}`;
+  };
 
   return (
     <motion.div
@@ -89,7 +241,7 @@ export function Home() {
           <div className="flex items-center gap-3">
             <div className="flex h-6 items-center gap-2 rounded-[20px] border border-[#0C9100] bg-[#032101] px-3 text-[10px] text-[#15EE01]">
               <ArrowUpRight size={12} />
-              <span>12.6%</span>
+              <span>{priceChange > 0 ? '+' : ''}{priceChange.toFixed(2)}%</span>
             </div>
             <button
               type="button"
@@ -111,15 +263,11 @@ export function Home() {
               <p className="text-[12px] leading-[14px] tracking-[0.14em] text-[#BCBCBC]">PORTFOLIO VALUE</p>
               <div className="mt-4 flex items-start gap-2">
                 <span className="mt-[3px] text-[30px] leading-none text-[#FFDB77]">₹</span>
-                <span className="text-[32px] font-bold leading-[38px] text-[#FFDB77]">4,82,640</span>
+                <span className="text-[32px] font-bold leading-[38px] text-[#FFDB77]">{isLoading ? '...' : portfolioValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
 
-              <div className="mt-3 flex items-center gap-3">
-                <div className="flex h-4 items-center gap-1 rounded-[20px] border border-[#0C9100] bg-[#032101] px-2 text-[8px] text-[#15EE01]">
-                  <ArrowUpRight size={10} />
-                  <span>+6,420</span>
-                </div>
-                <span className="text-[12px] leading-[14px] text-[#BCBCBC]">Today.+1,34%</span>
+              <div className={`mt-3 flex items-center gap-3 ${profit >= 0 ? 'text-[#4ADE80]' : 'text-[#EF4444]'}`}>
+                <span className="text-[12px] leading-[14px]">{profit >= 0 ? '+' : ''}₹{profit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({profitPercent}%)</span>
               </div>
 
               <div className="absolute right-4 top-4 h-[100px] w-[100px] rounded-full border border-[#E8B438] bg-[radial-gradient(circle_at_35%_30%,#FFE27A_0%,#F5BF31_34%,#C98900_100%)] shadow-[inset_0_0_0_5px_rgba(255,255,255,0.08)]">
@@ -134,8 +282,14 @@ export function Home() {
                       <stop offset="100%" stopColor="rgba(30,42,40,0.92)" />
                     </linearGradient>
                   </defs>
-                  <polyline points="10,78 34,66 58,66 82,50 108,56 132,38 156,42 180,24 204,36 226,18 252,22 276,8" fill="none" stroke="#84CBD1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                  <polygon points="10,78 34,66 58,66 82,50 108,56 132,38 156,42 180,24 204,36 226,18 252,22 276,8 276,90 10,90" fill="url(#homeAreaFill)" opacity="0.7" />
+                  {chartData.length > 1 ? (
+                    <>
+                      <polyline points={buyPoints} fill="none" stroke="#84CBD1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                      <polygon points={`${buyPoints} 276,90 8,90`} fill="url(#homeAreaFill)" opacity="0.7" />
+                    </>
+                  ) : (
+                    <polyline points="10,78 34,66 58,66 82,50 108,56 132,38 156,42 180,24 204,36 226,18 252,22 276,8" fill="none" stroke="#84CBD1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  )}
                 </svg>
               </div>
             </div>
@@ -147,7 +301,17 @@ export function Home() {
             <button
               key={action.label}
               type="button"
-              onClick={action.label === 'Buy Gold' ? () => navigate(Routes.BUY_1, { state: { backgroundLocation: location } }) : action.label === 'Sell Gold' ? () => navigate(Routes.SELL_1, { state: { backgroundLocation: location } }) : action.label === 'SIP' ? () => navigate(Routes.SIP_1, { state: { backgroundLocation: location } }) : action.label === 'History' ? () => navigate(Routes.ORDERS) : undefined}
+              onClick={() => {
+                if (action.label.startsWith('Buy')) {
+                  navigate(Routes.BUY_1, { state: { backgroundLocation: location, metalType } });
+                } else if (action.label.startsWith('Sell')) {
+                  navigate(Routes.SELL_1, { state: { backgroundLocation: location, metalType } });
+                } else if (action.label === 'SIP') {
+                  navigate(Routes.SIP_1, { state: { backgroundLocation: location } });
+                } else if (action.label === 'History') {
+                  navigate(Routes.ORDERS);
+                }
+              }}
               className="flex flex-col items-center"
             >
               <div className={`grid h-[52px] w-[52px] place-items-center rounded-full ${action.bg}`}>
@@ -169,10 +333,10 @@ export function Home() {
                 <div className="grid h-10 w-10 place-items-center rounded-full bg-[#3D3214] text-[#F7CD57]">
                   <span className="text-[18px]">◉</span>
                 </div>
-                <span className="text-[10px] leading-[15px] text-[#15EE01]">+3.2%</span>
+                <span className="text-[10px] leading-[15px] text-[#15EE01]">{goldBuyPrice > 0 ? `₹${goldBuyPrice.toLocaleString('en-IN')}` : '---'}</span>
               </div>
-              <p className="mt-8 text-[12px] leading-[14px] text-[#BCBCBC]">Gold Holdings</p>
-              <p className="mt-1 text-[16px] font-bold leading-[19px] text-white">24.82g</p>
+              <p className="mt-8 text-[12px] leading-[14px] text-[#BCBCBC]">Gold Buy Rate</p>
+              <p className="mt-1 text-[16px] font-bold leading-[19px] text-white">{goldBuyPrice > 0 ? `₹${goldBuyPrice.toLocaleString('en-IN')}/g` : 'Loading...'}</p>
               <svg viewBox="0 0 120 34" className="mt-4 h-[34px] w-full" aria-hidden="true">
                 <polyline points="2,24 18,16 34,22 50,12 66,16 82,6 98,14 118,4" fill="none" stroke="#F8CF59" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -183,10 +347,10 @@ export function Home() {
                 <div className="grid h-10 w-10 place-items-center rounded-full bg-[#233737] text-[#3AC7FF]">
                   <span className="text-[18px]">◈</span>
                 </div>
-                <span className="text-[10px] leading-[15px] text-[#15EE01]">+1.8%</span>
+                <span className="text-[10px] leading-[15px] text-[#15EE01]">{silverBuyPrice > 0 ? `₹${silverBuyPrice.toLocaleString('en-IN')}` : '---'}</span>
               </div>
-              <p className="mt-8 text-[12px] leading-[14px] text-[#BCBCBC]">Silver Holdings</p>
-              <p className="mt-1 text-[16px] font-bold leading-[19px] text-white">182.4g</p>
+              <p className="mt-8 text-[12px] leading-[14px] text-[#BCBCBC]">Silver Buy Rate</p>
+              <p className="mt-1 text-[16px] font-bold leading-[19px] text-white">{silverBuyPrice > 0 ? `₹${silverBuyPrice.toLocaleString('en-IN')}/g` : 'Loading...'}</p>
               <svg viewBox="0 0 120 34" className="mt-4 h-[34px] w-full" aria-hidden="true">
                 <polyline points="2,28 18,10 34,20 50,4 66,8 82,2 98,10 118,1" fill="none" stroke="#3AC7FF" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -199,12 +363,24 @@ export function Home() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-[16px] font-bold leading-[19px] text-white">Rate Analytics</h3>
-                <p className="mt-1 text-[12px] leading-[14px] text-[#BCBCBC]">Buy &amp; Sell rate trend</p>
+                <p className="mt-1 text-[12px] leading-[14px] text-[#BCBCBC]">Buy & Sell rate trend</p>
               </div>
 
               <div className="flex h-[40px] rounded-[30px] bg-[#24201A] p-[2px] text-[12px] leading-[14px]">
-                <button type="button" className="rounded-[28px] bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] px-4 font-bold text-black">Gold</button>
-                <button type="button" className="px-4 font-normal text-[#8C8B8B]">Silver</button>
+                <button
+                  type="button"
+                  onClick={() => setMetalType('gold')}
+                  className={`rounded-[28px] px-4 font-bold ${metalType === 'gold' ? 'bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-black' : 'text-[#8C8B8B]'}`}
+                >
+                  Gold
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMetalType('silver')}
+                  className={`px-4 font-normal ${metalType === 'silver' ? 'rounded-[28px] bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-black' : 'text-[#8C8B8B]'}`}
+                >
+                  Silver
+                </button>
               </div>
             </div>
 
@@ -216,23 +392,38 @@ export function Home() {
               <span>1Y</span>
             </div>
 
-            <div className="relative mt-6 h-[165px] overflow-hidden rounded-[20px] bg-[#15120F] px-1 pt-4">
-              <div className="absolute inset-x-0 bottom-0 flex items-end justify-between px-4 pb-3">
-                {[100, 90, 110, 80, 85, 105, 90, 95, 70, 90].map((height, index) => (
-                  <div key={index} className="w-[15px] rounded-[10px] bg-[linear-gradient(180deg,#B57F23_0%,#302A1B_100%)]" style={{ height: `${height}px` }} />
-                ))}
+            <div className="relative mt-6 h-[220px] rounded-[20px] bg-[#15120F] pt-2">
+              {chartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="buyBarGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#F8CF59" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#B68024" stopOpacity={0.75} />
+                      </linearGradient>
+                      <linearGradient id="sellBarGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#3AC7FF" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#0e7a9e" stopOpacity={0.75} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="rgba(255,255,255,0.06)" strokeDasharray="3 6" vertical={false} />
+                    <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: "#6B7280", fontSize: 10 }} interval="preserveStartEnd" />
+                    <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: "#6B7280", fontSize: 10 }} width={60} tickFormatter={(v) => `₹${(Number(v) / 1000).toFixed(0)}k`} />
+                    <Tooltip cursor={{ stroke: "rgba(255,255,255,0.15)", strokeDasharray: "4 4" }} contentStyle={{ background: "rgba(15,23,42,0.95)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", color: "#fff", fontSize: "12px" }} labelStyle={{ color: "#cbd5e1", marginBottom: 4 }} formatter={(value: number, name: string) => [`₹${value.toLocaleString('en-IN')}/g`, name === 'buyRate' ? 'Buy Rate' : 'Sell Rate']} />
+                    <Bar dataKey="buyRate" fill="url(#buyBarGrad)" radius={[6, 6, 2, 2]} maxBarSize={18} />
+                    <Bar dataKey="sellRate" fill="url(#sellBarGrad)" radius={[6, 6, 2, 2]} maxBarSize={18} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-[12px] text-[#6B7280]">No rate history available</div>
+              )}
+
+              <div className="absolute right-4 top-3 rounded-[30px] border border-[#777777] bg-[#38342C] px-4 py-2 text-center shadow-[0_0_0_1px_rgba(0,0,0,0.2)]">
+                <div className="text-[12px] leading-[14px] text-[#BCBCBC]">{latestLabel || 'Loading...'}</div>
+                <div className="mt-1 text-[16px] font-bold leading-[19px] text-[#F7CD57]">{latestPrice > 0 ? `₹${latestPrice.toLocaleString('en-IN')}` : '---'}</div>
               </div>
 
-              <svg viewBox="0 0 280 96" className="absolute left-2 right-2 top-4 h-[92px] w-[calc(100%-16px)]" aria-hidden="true">
-                <polyline points="8,60 42,68 76,48 110,74 144,66 178,44 212,64 246,56 278,46" fill="none" stroke="#3AC7FF" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-
-              <div className="absolute right-4 top-5 rounded-[30px] border border-[#777777] bg-[#38342C] px-4 py-2 text-center shadow-[0_0_0_1px_rgba(0,0,0,0.2)]">
-                <div className="text-[12px] leading-[14px] text-[#BCBCBC]">May 9, 2026</div>
-                <div className="mt-1 text-[16px] font-bold leading-[19px] text-[#F7CD57]">15,792</div>
-              </div>
-
-              <div className="absolute left-4 bottom-4 flex items-center gap-6 text-[12px] leading-[14px] text-[#BCBCBC]">
+              <div className="absolute left-4 bottom-3 flex items-center gap-6 text-[12px] leading-[14px] text-[#BCBCBC]">
                 <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#F8CF59]" />Buy</span>
                 <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#3AC7FF]" />Sell</span>
               </div>
@@ -254,32 +445,51 @@ export function Home() {
 
           <div className="flex items-center justify-between pb-3">
             <h3 className="text-[16px] font-bold leading-[19px] text-white">Recent Transactions</h3>
-            <span className="text-[12px] leading-[14px] text-[#8C8B8B]">All &gt;</span>
+            <div className="flex h-[30px] rounded-[20px] bg-[#24201A] p-[2px] text-[11px] leading-[14px]">
+              {['all', 'buy', 'sell'].map((f) => (
+                <button key={f} type="button" onClick={() => setOrderFilter(f)}
+                  className={`rounded-[18px] px-3 font-semibold capitalize ${orderFilter === f ? 'bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-black' : 'text-[#8C8B8B]'}`}>
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="space-y-4">
-            {transactions.map((item) => (
-              <article key={`${item.title}-${item.amount}`} className="rounded-[20px] bg-[#1A1710] px-4 py-4">
-                <div className="flex items-start gap-4">
-                  <div className={`grid h-[50px] w-[50px] place-items-center rounded-full ${item.tone === 'teal' ? 'bg-[#213435]' : 'bg-[#3D3214]'}`}>
-                    <span className="text-[24px] leading-none text-[#F7CD57]">{item.icon}</span>
-                  </div>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[14px] font-bold leading-[17px] text-white">{item.title}</span>
-                      <span className={`rounded-[2px] px-2 py-[2px] text-[10px] font-bold leading-[12px] ${item.type === 'SELL' ? 'bg-[#223436] text-[#6DD6FF]' : 'bg-[#4C4433] text-[#F7CD57]'}`}>{item.type}</span>
+            {ordersLoading ? (
+              <div className="py-8 text-center text-[12px] text-[#6B7280]">Loading transactions...</div>
+            ) : filteredOrders.length === 0 ? (
+              <div className="py-8 text-center text-[12px] text-[#6B7280]">No transactions found</div>
+            ) : (
+              filteredOrders.slice(0, 10).map((item, i) => {
+                const isSell = String(item.type || '').toUpperCase() === 'SELL';
+                const amount = Number(item.amount || 0);
+                const gold = Number(item.gold || 0);
+                const rate = Number(item.rate || 0);
+                const status = String(item.status || 'Completed');
+                const dateStr = String(item.date || '');
+                return (
+                  <article key={(item.id as string) || i} className="rounded-[20px] bg-[#1A1710] px-4 py-4">
+                    <div className="flex items-start gap-4">
+                      <div className={`grid h-[50px] w-[50px] place-items-center rounded-full ${isSell ? 'bg-[#213435]' : 'bg-[#3D3214]'}`}>
+                        <span className="text-[24px] leading-none text-[#F7CD57]">{isSell ? '↗' : '↙'}</span>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[14px] font-bold leading-[17px] text-white">Gold</span>
+                          <span className={`rounded-[2px] px-2 py-[2px] text-[10px] font-bold leading-[12px] ${isSell ? 'bg-[#223436] text-[#6DD6FF]' : 'bg-[#4C4433] text-[#F7CD57]'}`}>{isSell ? 'SELL' : 'BUY'}</span>
+                        </div>
+                        <p className="mt-1 text-[10px] leading-[12px] text-[#8B8B8B]">{gold > 0 ? `${gold.toFixed(2)}g` : ''}{gold > 0 && rate > 0 ? ' · ' : ''}{rate > 0 ? `₹${rate.toLocaleString('en-IN')}/g` : ''}{rate > 0 || gold > 0 ? ' · ' : ''}{formatOrderDate(dateStr)}</p>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[14px] font-bold leading-[17px] text-white">₹{amount.toLocaleString('en-IN')}</div>
+                        <div className={`mt-1 text-[10px] font-medium leading-[12px] ${status === 'Pending' ? 'text-[#FFCD0F]' : 'text-[#15EE01]'}`}>{status}</div>
+                      </div>
                     </div>
-                    <p className="mt-1 text-[10px] leading-[12px] text-[#8B8B8B]">{item.meta}</p>
-                  </div>
-
-                  <div className="text-right">
-                    <div className="text-[14px] font-bold leading-[17px] text-white">{item.amount}</div>
-                    <div className={`mt-1 text-[10px] font-medium leading-[12px] ${item.status === 'Pending' ? 'text-[#FFCD0F]' : 'text-[#15EE01]'}`}>{item.status}</div>
-                  </div>
-                </div>
-              </article>
-            ))}
+                  </article>
+                );
+              })
+            )}
           </div>
         </section>
       </main>
@@ -290,11 +500,53 @@ export function Home() {
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-      const statCards = [
-        { label: 'PORTFOLIO', value: '₹ 0.00', icon: 'wallet' },
-        { label: 'GOLD HOLDING', value: '0.000g', icon: 'growth' },
-        { label: 'TOTAL INVESTED', value: '₹ 0.00', icon: 'secure' },
-      ] as const;
+  const [goldBalance, setGoldBalance] = useState(0);
+  const [buyPrice, setBuyPrice] = useState(0);
+  const [sellPrice, setSellPrice] = useState(0);
+  const [totalInvested, setTotalInvested] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId =
+      augmontUser?.uniqueId ||
+      profile?.uniqueId ||
+      profile?.augmontUniqueId ||
+      buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) ||
+      '';
+    if (!uniqueId) { setLoading(false); return; }
+    setLoading(true);
+    Promise.all([
+      fetchAugmontPassbook(uniqueId),
+      fetchLiveGoldRateSnapshot({ force: true }),
+      fetchAugmontBuyOrders({ uniqueId }),
+    ]).then(([passbookRes, rateRes, buyRes]) => {
+      if (passbookRes?.ok) {
+        const pb = (passbookRes.passbook || {}) as Record<string, unknown>;
+        setGoldBalance(Number(pb.goldGrms || pb.goldBalance || pb.balance || 0));
+      }
+      if (rateRes?.ok) {
+        setBuyPrice(Number(rateRes.snapshot?.buyPrice || rateRes.snapshot?.currentPrice || 0));
+        setSellPrice(Number(rateRes.snapshot?.sellPrice || rateRes.snapshot?.currentPrice || 0));
+      }
+      if (buyRes?.ok) {
+        const total = (buyRes.orders || []).reduce((s: number, o: Record<string, unknown>) => s + Number(o.amount || 0), 0);
+        setTotalInvested(total);
+      }
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const portfolioValue = goldBalance * buyPrice;
+  const profit = portfolioValue - totalInvested;
+  const profitPercent = totalInvested > 0 ? ((profit / totalInvested) * 100).toFixed(2) : '0.00';
+  const statCards = [
+    { label: 'PORTFOLIO', value: loading ? '...' : `₹ ${portfolioValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, icon: 'wallet' },
+    { label: 'GOLD HOLDING', value: loading ? '...' : `${goldBalance.toFixed(3)}g`, icon: 'growth' },
+    { label: 'TOTAL INVESTED', value: loading ? '...' : `₹ ${totalInvested.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, icon: 'secure' },
+  ] as const;
 
       const quickActions = [
         { label: 'Buy Gold', caption: 'Instant', icon: 'buy' },
@@ -478,13 +730,58 @@ export function Dashboard() {
 
 export function Market() {
   const navigate = useNavigate();
+  const [metalType, setMetalType] = useState("gold");
+  const [chartData, setChartData] = useState<Array<{ date: string; buyRate: number; sellRate: number; label: string; price: number }>>([]);
+  const [liveRates, setLiveRates] = useState({
+    gold: { currentPrice: 0, buyPrice: 0, sellPrice: 0 },
+    silver: { currentPrice: 0, buyPrice: 0, sellPrice: 0 },
+    updatedAt: ""
+  });
+  const [isLoading, setIsLoading] = useState(true);
+
+  const loadRates = useCallback(async ({ forceRates = false } = {}) => {
+    setIsLoading(true);
+    const { fromDate, toDate } = getDateRange();
+    const [liveResponse, historyResponse] = await Promise.all([
+      fetchLiveGoldRateSnapshot({ force: forceRates }),
+      fetchAugmontRateHistory({ fromDate, toDate, metalType, force: forceRates })
+    ]);
+    if (liveResponse?.ok) setLiveRates(liveResponse.snapshot);
+    if (historyResponse?.ok) setChartData(historyResponse.history || []);
+    setIsLoading(false);
+  }, [metalType]);
+
+  useEffect(() => {
+    loadRates();
+    const intervalId = window.setInterval(() => loadRates({ forceRates: true }), 30000);
+    return () => window.clearInterval(intervalId);
+  }, [loadRates]);
+
+  const latestLabel = chartData.length > 0 ? chartData[chartData.length - 1]?.label || "" : "";
+  const latestPrice = chartData.length > 0 ? chartData[chartData.length - 1]?.price || 0 : 0;
+  const goldBuyPrice = liveRates?.gold?.buyPrice || 0;
+  const silverBuyPrice = liveRates?.silver?.buyPrice || 0;
+  const selectedBuyPrice = metalType === 'gold' ? goldBuyPrice : silverBuyPrice;
+
+  const calcChange = (data: typeof chartData) => {
+    if (data.length < 2) return { change: 0, up: true };
+    const first = data[0]?.price || data[0]?.buyRate || 0;
+    const last = data[data.length - 1]?.price || data[data.length - 1]?.buyRate || 0;
+    if (!first) return { change: 0, up: true };
+    const pct = ((last - first) / first) * 100;
+    return { change: pct, up: pct >= 0 };
+  };
+
+  const goldChange = calcChange(chartData);
+  const gold22KPrice = goldBuyPrice > 0 ? goldBuyPrice * 0.917 : 0;
+
   const movers = [
-    { id: 1, name: 'Gold 24K', unit: 'AU · per gram', price: '₹15,792', change: '+1.34%', up: true },
-    { id: 2, name: 'Silver', unit: 'AG · per gram', price: '₹77.40', change: '+0.62%', up: true },
-    { id: 3, name: 'Gold 22K', unit: 'AU22 · per gram', price: '₹14,476', change: '-0.18%', up: false },
-    { id: 4, name: 'Platinum', unit: 'PT · per gram', price: '₹3,210', change: '+1.34%', up: true },
-    { id: 5, name: 'Palladium', unit: 'PD · per gram', price: '₹2,860', change: '-1.04%', up: false },
+    { id: 1, name: 'Gold 24K', unit: 'AU · per gram', price: goldBuyPrice > 0 ? `₹${goldBuyPrice.toLocaleString('en-IN')}` : '---', change: goldChange.change, up: goldChange.up },
+    { id: 2, name: 'Gold 22K', unit: 'AU22 · per gram', price: gold22KPrice > 0 ? `₹${gold22KPrice.toLocaleString('en-IN')}` : '---', change: goldChange.change, up: goldChange.up },
+    { id: 3, name: 'Silver', unit: 'AG · per gram', price: silverBuyPrice > 0 ? `₹${silverBuyPrice.toLocaleString('en-IN')}` : '---', change: 0, up: true },
   ];
+
+  const moverIcons = ['₹', '₹', 'AG'];
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-full bg-black text-white" style={{ background: 'radial-gradient(103.89% 37.92% at 97.55% 0%, #4A3A1E 0%, #000000 100%)', fontFamily: 'Lato, sans-serif' }}>
@@ -495,9 +792,67 @@ export function Market() {
             <div className="flex items-center gap-4"><div className="flex h-6 items-center gap-2 rounded-[20px] border border-[#0C9100] bg-[#032101] px-3 text-[10px] text-[#15EE01]"><ArrowUpRight size={13} /><span>Live</span></div><button type="button" onClick={() => navigate(Routes.NOTIFICATIONS)} className="relative grid h-6 w-6 place-items-center rounded-full border border-[#E8B438] bg-[#1D170D] text-[#C1C1C1]" aria-label="Notifications"><Bell size={14} /><span className="absolute right-[2px] top-[2px] h-[5px] w-[5px] rounded-full bg-[#EE0105]" /></button></div>
           </div>
         </section>
-        <section className="mt-4 px-6"><div className="rounded-[20px] border border-[#B28A3B] bg-[linear-gradient(45deg,#1E2A28_61.54%,#6C5123_97.21%)] p-4"><div className="flex items-start justify-between"><div><p className="text-[12px] text-[#7E7E7E]">Spot Rate Gold</p><p className="mt-1 bg-[linear-gradient(90deg,#F8CF59_0%,#B68024_100%)] bg-clip-text text-[24px] font-extrabold leading-[29px] text-transparent">₹15,792 /g</p><p className="mt-1 text-[10px] text-[#15EE01]">↗ +1.34% today</p></div><div className="flex h-[30px] w-[100px] rounded-[30px] bg-[#24201A]"><div className="flex h-full w-1/2 items-center justify-center rounded-[30px] bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-[12px] font-bold text-black">Gold</div><div className="flex h-full w-1/2 items-center justify-center text-[12px] text-[#8C8B8B]">Silver</div></div></div><div className="mt-8 flex items-center justify-between px-2 text-[12px] font-bold text-[#8B8787]"><span>1D</span><span>1W</span><span className="rounded-[30px] border border-[#B17B21] bg-[#38342C] px-5 py-1 text-[#F7CD57]">1M</span><span>3M</span><span>1Y</span></div><div className="relative mt-4 h-[180px] rounded-[10px] bg-[#15120F] p-3"><div className="absolute inset-x-3 bottom-4 flex items-end justify-between">{[100, 90, 110, 80, 85, 105, 90, 95, 70, 90].map((height, i) => <div key={i} className="w-[15px] rounded-[10px] bg-[linear-gradient(180deg,#B57F23_0%,#302A1B_100%)]" style={{ height }} />)}</div><svg viewBox="0 0 280 96" className="absolute left-3 right-3 top-8 h-[90px]" aria-hidden="true"><polyline points="8,58 42,66 76,46 110,72 144,64 178,42 212,62 246,54 278,44" fill="none" stroke="#3AC7FF" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg><div className="absolute right-4 top-10 rounded-[30px] border border-[#777777] bg-[#38342C] px-5 py-2 text-center"><div className="text-[12px] text-[#BCBCBC]">May 9, 2026</div><div className="text-[16px] font-bold text-[#F7CD57]">15,792</div></div><div className="absolute bottom-4 left-3 flex items-center gap-6 text-[12px] text-[#BCBCBC]"><span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#F8CF59]" />Buy</span><span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#3AC7FF]" />Sell</span></div></div></div></section>
+
+        <section className="mt-4 px-6">
+          <div className="rounded-[20px] border border-[#B28A3B] bg-[#1A1710] px-4 pb-4 pt-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-[16px] font-bold leading-[19px] text-white">Rate Analytics</h3>
+                <p className="mt-1 text-[12px] leading-[14px] text-[#BCBCBC]">Buy & Sell rate trend</p>
+              </div>
+              <div className="flex h-[40px] rounded-[30px] bg-[#24201A] p-[2px] text-[12px] leading-[14px]">
+                <button type="button" onClick={() => setMetalType('gold')}
+                  className={`rounded-[28px] px-4 font-bold ${metalType === 'gold' ? 'bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-black' : 'text-[#8C8B8B]'}`}>Gold</button>
+                <button type="button" onClick={() => setMetalType('silver')}
+                  className={`px-4 font-normal ${metalType === 'silver' ? 'rounded-[28px] bg-[linear-gradient(124.73deg,#FED55C_14.43%,#DA9500_86.04%)] text-black' : 'text-[#8C8B8B]'}`}>Silver</button>
+              </div>
+            </div>
+
+            <div className="mt-8 flex items-center justify-between px-6 text-[12px] font-bold leading-[14px] text-[#8B8787]">
+              <span>1D</span><span>1W</span><span className="rounded-[30px] border border-[#B17B21] bg-[#38342C] px-5 py-1 text-[#F7CD57]">1M</span><span>3M</span><span>1Y</span>
+            </div>
+
+            <div className="relative mt-6 h-[220px] rounded-[20px] bg-[#15120F] pt-2">
+              {chartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="marketBuyBarGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#F8CF59" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#B68024" stopOpacity={0.75} />
+                      </linearGradient>
+                      <linearGradient id="marketSellBarGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#3AC7FF" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#0e7a9e" stopOpacity={0.75} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="rgba(255,255,255,0.06)" strokeDasharray="3 6" vertical={false} />
+                    <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fill: "#6B7280", fontSize: 10 }} interval="preserveStartEnd" />
+                    <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: "#6B7280", fontSize: 10 }} width={60} tickFormatter={(v) => `₹${(Number(v) / 1000).toFixed(0)}k`} />
+                    <Tooltip cursor={{ stroke: "rgba(255,255,255,0.15)", strokeDasharray: "4 4" }} contentStyle={{ background: "rgba(15,23,42,0.95)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", color: "#fff", fontSize: "12px" }} labelStyle={{ color: "#cbd5e1", marginBottom: 4 }} formatter={(value: number, name: string) => [`₹${value.toLocaleString('en-IN')}/g`, name === 'buyRate' ? 'Buy Rate' : 'Sell Rate']} />
+                    <Bar dataKey="buyRate" fill="url(#marketBuyBarGrad)" radius={[6, 6, 2, 2]} maxBarSize={18} />
+                    <Bar dataKey="sellRate" fill="url(#marketSellBarGrad)" radius={[6, 6, 2, 2]} maxBarSize={18} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-[12px] text-[#6B7280]">{isLoading ? 'Loading...' : 'No rate history available'}</div>
+              )}
+
+              <div className="absolute right-4 top-3 rounded-[30px] border border-[#777777] bg-[#38342C] px-4 py-2 text-center shadow-[0_0_0_1px_rgba(0,0,0,0.2)]">
+                <div className="text-[12px] leading-[14px] text-[#BCBCBC]">{latestLabel || 'Loading...'}</div>
+                <div className="mt-1 text-[16px] font-bold leading-[19px] text-[#F7CD57]">{latestPrice > 0 ? `₹${latestPrice.toLocaleString('en-IN')}` : '---'}</div>
+              </div>
+
+              <div className="absolute left-4 bottom-3 flex items-center gap-6 text-[12px] leading-[14px] text-[#BCBCBC]">
+                <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#F8CF59]" />Buy</span>
+                <span className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#3AC7FF]" />Sell</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="mt-6 px-6"><div className="relative"><Search className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#4E4E4E]" /><input type="text" placeholder="Search assets, coins, jewellry" className="h-10 w-full rounded-[20px] border border-[#8E742F] bg-[#1A1710] pl-12 pr-4 text-[12px] text-[#BCBCBC] placeholder:text-[#4E4E4E] focus:outline-none" /></div></section>
-        <section className="mt-8 px-6"><h2 className="text-[18px] leading-[22px] text-white">Top Movers</h2><div className="mt-6 space-y-4">{movers.map((item, index) => <article key={item.id} className="flex items-center justify-between rounded-[20px] border border-[#4E4E4E] bg-[#1A1710] px-4 py-4"><div className="flex items-center gap-4"><div className="grid h-[50px] w-[50px] place-items-center rounded-full bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)] text-[20px] font-bold text-black">{index === 1 ? 'AG' : '₹'}</div><div><div className="text-[16px] font-semibold text-white">{item.name}</div><div className="text-[12px] text-[#6E6E6E]">{item.unit}</div></div></div><div className="text-right"><div className="text-[16px] font-semibold text-white">{item.price}</div><div className={`text-[12px] ${item.up ? 'text-[#15EE01]' : 'text-[#FF3700]'}`}>{item.up ? '↗ ' : '↘ '}{item.change}</div></div></article>)}</div></section>
+        <section className="mt-8 px-6"><h2 className="text-[18px] leading-[22px] text-white">Top Movers</h2><div className="mt-6 space-y-4">{movers.map((item, index) => <article key={item.id} className="flex items-center justify-between rounded-[20px] border border-[#4E4E4E] bg-[#1A1710] px-4 py-4"><div className="flex items-center gap-4"><div className="grid h-[50px] w-[50px] place-items-center rounded-full bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)] text-[20px] font-bold text-black">{moverIcons[index]}</div><div><div className="text-[16px] font-semibold text-white">{item.name}</div><div className="text-[12px] text-[#6E6E6E]">{item.unit}</div></div></div><div className="text-right"><div className="text-[16px] font-semibold text-white">{item.price}</div><div className={`text-[12px] ${item.up ? 'text-[#15EE01]' : 'text-[#FF3700]'}`}>{item.up ? '↗ ' : '↘ '}{item.change > 0 ? '+' : ''}{item.change.toFixed(2)}%</div></div></article>)}</div></section>
       </main>
     </motion.div>
   );
@@ -506,17 +861,55 @@ export function Market() {
 export function Orders() {
   const navigate = useNavigate();
   const [activeFilter, setActiveFilter] = React.useState('All');
-  const filters = ['All', 'Buy', 'Sell', 'SIP'] as const;
-  const entries = [
-    { id: 1, type: 'BUY', name: 'Gold', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-    { id: 2, type: 'SELL', name: 'Gold', amount: '₹3,250', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[#2E5250]', badgeBg: 'bg-[#243736]', badgeText: 'text-[#6DD6FF]' },
-    { id: 3, type: 'BUY', name: 'Gold (SIP)', amount: '₹5,000', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-    { id: 4, type: 'BUY', name: 'Gold', amount: '₹11,300', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-    { id: 5, type: 'BUY', name: 'Silver', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-    { id: 6, type: 'SELL', name: 'Gold', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[#2E5250]', badgeBg: 'bg-[#243736]', badgeText: 'text-[#6DD6FF]' },
-    { id: 7, type: 'BUY', name: 'Gold (SIP)', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-    { id: 8, type: 'BUY', name: 'Silver', amount: '₹12,400', meta: '0.82g · ₹15,121/g · Today · 4:32 PM', status: 'Completed', circleBg: 'bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)]', badgeBg: 'bg-[#38342C]', badgeText: 'text-[#F7CD57]' },
-  ];
+  const [orders, setOrders] = useState<Array<Record<string, unknown>>>([]);
+  const [loading, setLoading] = useState(true);
+  const filters = ['All', 'Buy', 'Sell'] as const;
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId =
+      augmontUser?.uniqueId ||
+      profile?.uniqueId ||
+      profile?.augmontUniqueId ||
+      buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) ||
+      '';
+
+    if (!uniqueId) { setLoading(false); return; }
+
+    setLoading(true);
+    Promise.all([
+      fetchAugmontBuyOrders({ uniqueId }),
+      fetchAugmontSellOrders({ uniqueId }),
+    ]).then(([buyRes, sellRes]) => {
+      const buys = (buyRes?.orders || []).map((o: Record<string, unknown>) => ({ ...o, type: 'BUY' }));
+      const sells = (sellRes?.orders || []).map((o: Record<string, unknown>) => ({ ...o, type: 'SELL' }));
+      const all = [...buys, ...sells].sort(
+        (a, b) => new Date(String(b.date || 0)).getTime() - new Date(String(a.date || 0)).getTime()
+      );
+      setOrders(all);
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const filteredOrders = activeFilter === 'All'
+    ? orders
+    : orders.filter((o) => String(o.type || '').toUpperCase() === activeFilter.toUpperCase());
+
+  const formatOrderDate = (dateStr: string) => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    if (isToday) return `Today · ${time}`;
+    return `${d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} · ${time}`;
+  };
+
+  const buyCount = orders.filter((o) => String(o.type || '').toUpperCase() === 'BUY').length;
+  const sellCount = orders.filter((o) => String(o.type || '').toUpperCase() === 'SELL').length;
+  const totalAmt = orders.reduce((s, o) => s + Number(o.amount || 0), 0);
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-full bg-black text-white" style={{ background: 'radial-gradient(103.89% 37.92% at 97.55% 0%, #4A3A1E 0%, #000000 100%)', fontFamily: 'Lato, sans-serif' }}>
@@ -557,23 +950,21 @@ export function Orders() {
           <div className="rounded-[20px] border border-[#B28A3B] bg-[linear-gradient(30.18deg,#1E2A28_64.48%,#6C5123_96.45%)] px-4 pb-5 pt-[19px]">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-[12px] leading-[14px] text-[#7E7E7E]">THIS MONTH</p>
-                <p className="mt-1 bg-[linear-gradient(90deg,#F8CF59_0%,#B68024_100%)] bg-clip-text text-[32px] font-extrabold leading-[38px] text-transparent">₹61,444</p>
-                <p className="mt-[6px] text-[12px] leading-[14px] text-[#7E7E7E]">Total invested · 6 orders</p>
+                <p className="text-[12px] leading-[14px] text-[#7E7E7E]">ALL ORDERS</p>
+                <p className="mt-1 bg-[linear-gradient(90deg,#F8CF59_0%,#B68024_100%)] bg-clip-text text-[32px] font-extrabold leading-[38px] text-transparent">₹{totalAmt.toLocaleString('en-IN')}</p>
+                <p className="mt-[6px] text-[12px] leading-[14px] text-[#7E7E7E]">{orders.length} total orders</p>
               </div>
               <div className="grid h-[100px] w-[100px] place-items-center rounded-full border-2 border-[#E8B438] bg-[linear-gradient(180deg,#F7CD57_0%,#AA7702_100%)] text-[16px] font-bold text-[#D59D22] shadow-[inset_0_0_0_3px_rgba(0,0,0,0.18)]">KARATLY</div>
             </div>
-            <div className="mt-[15px] grid grid-cols-3 gap-4">
-              {[
-                { value: '24', label: 'BUY' },
-                { value: '16', label: 'SELL' },
-                { value: '3', label: 'SIP' },
-              ].map((item) => (
-                <div key={item.label} className="rounded-[10px] border border-[#4E4E4E] bg-[#1A1710] py-[10px] text-center">
-                  <div className="bg-[linear-gradient(90deg,#F8CF59_0%,#B68024_100%)] bg-clip-text text-[28px] font-extrabold leading-[34px] text-transparent">{item.value}</div>
-                  <div className="text-[12px] leading-[14px] text-white">{item.label}</div>
-                </div>
-              ))}
+            <div className="mt-[15px] grid grid-cols-2 gap-4">
+              <div className="rounded-[10px] border border-[#4E4E4E] bg-[#1A1710] py-[10px] text-center">
+                <div className="bg-[linear-gradient(90deg,#F8CF59_0%,#B68024_100%)] bg-clip-text text-[28px] font-extrabold leading-[34px] text-transparent">{buyCount}</div>
+                <div className="text-[12px] leading-[14px] text-white">BUY</div>
+              </div>
+              <div className="rounded-[10px] border border-[#4E4E4E] bg-[#1A1710] py-[10px] text-center">
+                <div className="bg-[linear-gradient(90deg,#3AC7FF_0%,#0e7a9e_100%)] bg-clip-text text-[28px] font-extrabold leading-[34px] text-transparent">{sellCount}</div>
+                <div className="text-[12px] leading-[14px] text-white">SELL</div>
+              </div>
             </div>
           </div>
         </section>
@@ -595,26 +986,43 @@ export function Orders() {
 
         <section className="mt-4 px-6">
           <div className="flex max-h-[456px] flex-col gap-4 overflow-y-auto">
-            {entries.map((item) => (
-              <article key={item.id} className="flex h-[60px] items-center rounded-[20px] border border-[#4E4E4E] bg-[#1A1710] px-[10px]">
-                <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${item.circleBg}`}>
-                  <span className="text-[16px] font-bold text-black">
-                    {item.type === 'SELL' ? <ArrowUpRight size={16} className="text-[#6DD6FF]" /> : <ArrowDownLeft size={16} className="text-black" />}
-                  </span>
-                </div>
-                <div className="ml-3 min-w-0 flex-1">
-                  <div className="flex items-center gap-[6px]">
-                    <span className="text-[12px] font-semibold leading-[14px] text-white">{item.name}</span>
-                    <span className={`flex h-3 items-center rounded-[3px] ${item.badgeBg} px-[5px] text-[8px] font-semibold leading-[10px] ${item.badgeText}`}>{item.type}</span>
-                  </div>
-                  <p className="mt-[2px] text-[8px] leading-[10px] text-[#6E6E6E]">{item.meta}</p>
-                </div>
-                <div className="ml-auto shrink-0 text-right">
-                  <div className="text-[12px] font-semibold leading-[14px] text-white">{item.amount}</div>
-                  <div className="mt-[2px] text-[8px] leading-[10px] text-[#15EE01]">{item.status}</div>
-                </div>
-              </article>
-            ))}
+            {loading ? (
+              <div className="py-8 text-center text-[12px] text-[#6B7280]">Loading orders...</div>
+            ) : filteredOrders.length === 0 ? (
+              <div className="py-8 text-center text-[12px] text-[#6B7280]">No orders found</div>
+            ) : (
+              filteredOrders.map((item, i) => {
+                const isSell = String(item.type || '').toUpperCase() === 'SELL';
+                const amount = Number(item.amount || 0);
+                const gold = Number(item.gold || item.quantity || item.grams || 0);
+                const rate = Number(item.rate || item.price || 0);
+                const status = String(item.status || 'Completed');
+                const dateStr = String(item.date || item.createdAt || '');
+                const metalName = String(item.metalType || item.metal || 'gold');
+                const displayName = metalName === 'silver' ? 'Silver' : 'Gold';
+
+                return (
+                  <article key={(item.id as string) || i} className="flex h-[60px] items-center rounded-[20px] border border-[#4E4E4E] bg-[#1A1710] px-[10px]">
+                    <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${isSell ? 'bg-[#213435]' : 'bg-[#3D3214]'}`}>
+                      {isSell ? <ArrowUpRight size={16} className="text-[#6DD6FF]" /> : <ArrowDownLeft size={16} className="text-[#F7CD57]" />}
+                    </div>
+                    <div className="ml-3 min-w-0 flex-1">
+                      <div className="flex items-center gap-[6px]">
+                        <span className="text-[12px] font-semibold leading-[14px] text-white">{displayName}</span>
+                        <span className={`flex h-3 items-center rounded-[3px] px-[5px] text-[8px] font-semibold leading-[10px] ${isSell ? 'bg-[#243736] text-[#6DD6FF]' : 'bg-[#38342C] text-[#F7CD57]'}`}>{isSell ? 'SELL' : 'BUY'}</span>
+                      </div>
+                      <p className="mt-[2px] text-[8px] leading-[10px] text-[#6E6E6E]">
+                        {gold > 0 ? `${gold.toFixed(2)}g` : ''}{gold > 0 && rate > 0 ? ' · ' : ''}{rate > 0 ? `₹${rate.toLocaleString('en-IN')}/g` : ''}{rate > 0 || gold > 0 ? ' · ' : ''}{formatOrderDate(dateStr)}
+                      </p>
+                    </div>
+                    <div className="ml-auto shrink-0 text-right">
+                      <div className="text-[12px] font-semibold leading-[14px] text-white">₹{amount.toLocaleString('en-IN')}</div>
+                      <div className={`mt-[2px] text-[8px] leading-[10px] ${status === 'Pending' ? 'text-[#FFCD0F]' : 'text-[#15EE01]'}`}>{status}</div>
+                    </div>
+                  </article>
+                );
+              })
+            )}
           </div>
         </section>
       </main>
@@ -651,8 +1059,45 @@ export function Profile() {
   const location = useLocation();
   const { state, dispatch } = useAuth();
   const [notificationsOn, setNotificationsOn] = React.useState(true);
-  const displayName = state.user?.name || 'Hariprasanth';
-  const displayEmail = (state.user as { email?: string } | undefined)?.email || 'hariprasanth@karatly.in';
+  const [goldGrams, setGoldGrams] = useState(0);
+  const [silverGrams, setSilverGrams] = useState(0);
+  const [buyPrice, setBuyPrice] = useState(0);
+  const [silverBuyPrice, setSilverBuyPrice] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    const uniqueId =
+      augmontUser?.uniqueId ||
+      profile?.uniqueId ||
+      profile?.augmontUniqueId ||
+      buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) ||
+      '';
+    if (!uniqueId) { setLoading(false); return; }
+    setLoading(true);
+    Promise.all([
+      fetchAugmontPassbook(uniqueId),
+      fetchLiveGoldRateSnapshot({ force: true }),
+    ]).then(([passbookRes, rateRes]) => {
+      if (passbookRes?.ok) {
+        const pb = (passbookRes.passbook || {}) as Record<string, unknown>;
+        setGoldGrams(Number(pb.goldGrms || pb.goldBalance || pb.balance || 0));
+        setSilverGrams(Number(pb.silverGrms || pb.silverBalance || 0));
+      }
+      if (rateRes?.ok) {
+        setBuyPrice(Number(rateRes.snapshot?.gold?.buyPrice || rateRes.snapshot?.buyPrice || 0));
+        setSilverBuyPrice(Number(rateRes.snapshot?.silver?.buyPrice || 0));
+      }
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const portfolioValue = goldGrams * buyPrice + silverGrams * silverBuyPrice;
+
+  const displayName = state.fullName || state.user?.name || '';
+  const displayEmail = state.email || '';
 
   return (
     <motion.div
@@ -667,7 +1112,7 @@ export function Profile() {
       <main className="mx-auto w-full max-w-[390px] pb-[110px]">
         <section className="flex items-center justify-between px-6 pb-1 pt-[3px] text-[12px] leading-[18px] text-white"><span>9:30</span><div className="flex items-center gap-2 text-white"><svg width="18" height="12" viewBox="0 0 18 12" fill="none" aria-hidden="true"><rect x="1" y="8" width="3" height="4" rx="1" fill="currentColor" /><rect x="6" y="5" width="3" height="7" rx="1" fill="currentColor" /><rect x="11" y="2" width="3" height="10" rx="1" fill="currentColor" /></svg><svg width="14" height="12" viewBox="0 0 14 12" fill="none" aria-hidden="true"><path d="M7 1C4 1 1.5 3.3 1 6.5H13C12.5 3.3 10 1 7 1Z" fill="currentColor" opacity="0.95" /></svg><svg width="25" height="12" viewBox="0 0 25 12" fill="none" aria-hidden="true"><rect x="1" y="1" width="21" height="10" rx="3" stroke="currentColor" strokeWidth="1" /><rect x="3" y="3" width="15" height="6" rx="1" fill="currentColor" /><path d="M24 4V8C24 8 25 7.5 25 6C25 4.5 24 4 24 4Z" fill="currentColor" /></svg></div></section>
         <section className="flex items-center justify-between px-6 pt-10"><div className="flex items-center gap-2 text-[#F7CD57]"><button type="button" aria-label="Back" className="grid h-6 w-6 place-items-center"><ArrowLeft size={18} /></button><span className="text-[14px] font-normal leading-[21px]">Profile</span></div><div className="flex items-center gap-3"><div className="flex h-6 items-center gap-2 rounded-[20px] border border-[#0C9100] bg-[#032101] px-3 text-[10px] text-[#15EE01]"><ArrowUpRight size={12} /><span>12.6%</span></div><button type="button" aria-label="Notifications" onClick={() => navigate(Routes.NOTIFICATIONS)} className="relative grid h-6 w-6 place-items-center rounded-full border border-[#E8B438] bg-[#1D170D] text-[#C1C1C1]"><Bell size={14} /><span className="absolute right-[2px] top-[2px] h-[5px] w-[5px] rounded-full bg-[#EE0105]" /></button></div></section>
-        <section className="mt-6 px-6"><div className="relative overflow-hidden rounded-[10px] border border-[#E8B438] bg-black"><div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(247,205,87,0.18),transparent_30%),radial-gradient(circle_at_85%_15%,rgba(247,205,87,0.08),transparent_18%),linear-gradient(135deg,rgba(255,98,0,0.08),transparent_30%)]" /><div className="relative min-h-[170px] px-4 pb-4 pt-5"><div className="flex items-start gap-4"><div className="relative"><div className="grid h-[60px] w-[60px] place-items-center rounded-full bg-[linear-gradient(180deg,#F7CD57_0%,#E8B438_100%)] text-[20px] font-bold text-black shadow-[0_0_10px_10px_rgba(247,205,87,0.25)]">{displayName.split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase() || 'HP'}</div><div className="absolute -bottom-1 -right-1 grid h-6 w-6 place-items-center rounded-full border border-black bg-[#0FB300] text-black"><CheckCircle2 size={14} strokeWidth={2.4} /></div></div><div className="pt-1"><div className="text-[16px] font-bold leading-[19px] text-white">{displayName}</div><div className="text-[12px] leading-[14px] text-[#9E9E9E]">{displayEmail}</div><div className="mt-2 inline-flex items-center gap-2 rounded-[20px] bg-[#1C1A17] px-4 py-1 text-[12px] leading-[14px] text-[#F7CD57]"><Shield size={12} /><span>Gold Member · Tier II</span></div></div></div><div className="mt-6 grid grid-cols-3 gap-3"><ProfileMetric icon={<Wallet size={14} />} value="24.82g" label="Gold" tone="gold" /><ProfileMetric icon={<Sparkles size={14} />} value="182g" label="Silver" tone="blue" /><ProfileMetric icon={<ShieldCheck size={14} />} value="₹4.8L" label="Portfolio Value" tone="green" /></div></div></div></section>
+        <section className="mt-6 px-6"><div className="relative overflow-hidden rounded-[10px] border border-[#E8B438] bg-black"><div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(247,205,87,0.18),transparent_30%),radial-gradient(circle_at_85%_15%,rgba(247,205,87,0.08),transparent_18%),linear-gradient(135deg,rgba(255,98,0,0.08),transparent_30%)]" /><div className="relative min-h-[170px] px-4 pb-4 pt-5"><div className="flex items-start gap-4"><div className="relative"><div className="grid h-[60px] w-[60px] place-items-center rounded-full bg-[linear-gradient(180deg,#F7CD57_0%,#E8B438_100%)] text-[20px] font-bold text-black shadow-[0_0_10px_10px_rgba(247,205,87,0.25)]">{displayName ? displayName.split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase() : '--'}</div><div className="absolute -bottom-1 -right-1 grid h-6 w-6 place-items-center rounded-full border border-black bg-[#0FB300] text-black"><CheckCircle2 size={14} strokeWidth={2.4} /></div></div><div className="pt-1"><div className="text-[16px] font-bold leading-[19px] text-white">{displayName || 'Loading...'}</div><div className="text-[12px] leading-[14px] text-[#9E9E9E]">{displayEmail || 'Loading...'}</div><div className="mt-2 inline-flex items-center gap-2 rounded-[20px] bg-[#1C1A17] px-4 py-1 text-[12px] leading-[14px] text-[#F7CD57]"><Shield size={12} /><span>Gold Member · Tier II</span></div></div></div><div className="mt-6 grid grid-cols-3 gap-3"><ProfileMetric icon={<Wallet size={14} />} value={loading ? '...' : `${goldGrams.toFixed(2)}g`} label="Gold" tone="gold" /><ProfileMetric icon={<Sparkles size={14} />} value={loading ? '...' : `${silverGrams.toFixed(2)}g`} label="Silver" tone="blue" /><ProfileMetric icon={<ShieldCheck size={14} />} value={loading ? '...' : portfolioValue >= 100000 ? `₹${(portfolioValue / 100000).toFixed(1)}L` : `₹${portfolioValue.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`} label="Portfolio Value" tone="green" /></div></div></div></section>
         <section className="mt-6 px-6"><div className="flex items-center rounded-[10px] border border-[#2E2E2E] bg-[linear-gradient(100.54deg,#866117_-20.03%,#000000_38.57%)] px-4 py-4"><div className="grid h-[60px] w-[60px] place-items-center rounded-full bg-[linear-gradient(138.56deg,#9C7423_17.67%,#36280C_81.26%)] text-[#E8B438]"><Rocket size={28} /></div><div className="ml-4 flex-1"><div className="text-[14px] font-semibold leading-[17px] text-white">Boost Your tier</div><div className="text-[10px] leading-[12px] text-[#7E7E7E]">Invest ₹17,360 more this month to reach Tier III.</div></div><button type="button" className="rounded-[6px] bg-[linear-gradient(270deg,#DB9600_0%,#F7CD57_100%)] px-4 py-2 text-[10px] font-bold text-black">Invest Now</button></div></section>
         <section className="mt-8 px-6"><div className="text-[14px] font-semibold leading-[17px] text-[#9E9E9E]">ACCOUNT</div><div className="mt-3 overflow-hidden rounded-[10px] border border-[#2E2E2E] bg-[#0F1416]">              <button type="button" onClick={() => navigate(Routes.KYC_VERIFICATION)} className="w-full text-left"><ProfileRow icon={<Shield size={16} />} title="KYC Verification" subtitle="Your Identity is Verified" right={<span className="rounded-[5px] bg-[#1A301E] px-4 py-1 text-[10px] text-[#15EE01]">Verified</span>} /></button><Divider />              <button type="button" onClick={() => navigate(Routes.PAYMENT_METHODS)} className="w-full text-left"><ProfileRow icon={<CreditCard size={16} />} title="Payment Methods" subtitle="3 Saved methods" /></button><Divider /><button type="button" onClick={() => navigate(Routes.REWARDS)} className="w-full text-left"><ProfileRow icon={<Gift size={16} />} title="Rewards & Referrals" subtitle="You’ve earned ₹420" /></button></div></section>
         <section className="mt-8 px-6"><div className="text-[14px] font-semibold leading-[17px] text-[#9E9E9E]">PREFERENCES</div><div className="mt-3 overflow-hidden rounded-[10px] border border-[#2E2E2E] bg-[#0F1416]"><div className="flex items-center px-4 py-4"><div className="grid h-10 w-10 place-items-center rounded-full bg-[#202326] text-[#BFBFBF]"><Bell size={16} /></div><div className="ml-4 flex-1"><div className="text-[14px] font-bold text-white">Notification</div><div className="text-[10px] leading-[12px] text-[#7E7E7E]">Stay updated with Important alerts</div></div><button type="button" role="switch" aria-checked={notificationsOn} onClick={() => setNotificationsOn(!notificationsOn)} className={`relative flex h-5 w-10 items-center rounded-full p-[3px] transition-colors ${notificationsOn ? 'bg-[#E8B438]' : 'bg-[#A2A2A2]'}`}><div className={`h-[14px] w-[14px] rounded-full bg-[#D9D9D9] transition-transform ${notificationsOn ? 'translate-x-5' : 'translate-x-0'}`} /></button></div><Divider /><button type="button" onClick={() => navigate(Routes.SECURITY)} className="w-full text-left"><ProfileRow icon={<ShieldCheck size={16} />} title="Security" subtitle="Manage passwords and privacy" /></button><Divider /><button type="button" onClick={() => navigate(Routes.HELP_CENTER)} className="w-full text-left"><ProfileRow icon={<CircleHelp size={16} />} title="Help & Support" subtitle="FAQs and Contact Support" /></button><Divider /><button type="button" onClick={() => navigate(Routes.TERMS)} className="w-full text-left"><ProfileRow icon={<User size={16} />} title="Terms & Condition" subtitle="Regulations of company" /></button></div></section>

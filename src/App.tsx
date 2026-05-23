@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { MobileFrame } from './components/MobileFrame';
 import { BottomNav } from './components/BottomNav';
@@ -21,10 +21,11 @@ import { Security } from './pages/Security';
 import { HelpCenter } from './pages/HelpCenter';
 import { Terms } from './pages/Terms';
 
-import { AuthProvider } from './store/AuthContext';
+import { AuthProvider, useAuth } from './store/AuthContext';
 import { CartProvider } from './store/CartContext';
 import { GoldFlowProvider } from './store/GoldFlowContext';
 import { AnimatePresence, LayoutGroup } from 'framer-motion';
+import { Toaster } from '@/components/ui/toaster';
 
 const TAB_PATHS = [AppRoutes.HOME, AppRoutes.DASHBOARD, AppRoutes.MARKET, AppRoutes.ORDERS, AppRoutes.CATEGORIES, AppRoutes.BRANDS, AppRoutes.CART, AppRoutes.PROFILE, AppRoutes.KYC_VERIFICATION, AppRoutes.PAYMENT_METHODS, AppRoutes.REWARDS, AppRoutes.SECURITY, AppRoutes.HELP_CENTER, AppRoutes.TERMS];
 
@@ -138,6 +139,7 @@ function App() {
       <CartProvider>
         <GoldFlowProvider>
           <AppContent />
+          <Toaster />
         </GoldFlowProvider>
       </CartProvider>
     </AuthProvider>

@@ -1,21 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Routes, AutoAdvanceDelays } from '../lib/routes';
+import { Routes } from '../lib/routes';
 import { useGoldFlow } from '../store/GoldFlowContext';
 import { LoadingScreen } from '../components/LoadingScreen';
 import { transitions, Easings, Duration, SpringConfigs } from '../lib/animations';
-import { ArrowLeft, ShieldCheck, Sparkles, Coins } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Sparkles, Coins, Loader2 } from 'lucide-react';
+import { fetchAugmontSipRates, fetchLiveGoldRateSnapshot, createAugmontBuyOrder, getAugmontUser } from '../api/augmontApi';
+import { getUserProfile } from '../api/authApi';
+import { buildMobileDobUniqueId } from '../lib/uniqueId';
+import { useToast } from '@/hooks/use-toast';
+
+function StepRail({ label, active }: { label: string; active?: boolean }) {
+  return (
+    <div className="relative">
+      <div className={`h-[5px] rounded-full ${active ? 'bg-[linear-gradient(90deg,#FFE9AA_0%,#F7CD57_50%,#CA9B14_100%)]' : 'bg-[#3E3E3E]'}`} />
+      <div className={`mt-1 text-[12px] leading-[18px] ${active ? 'text-[#F7CD57]' : 'text-[#515151]'}`}>{label}</div>
+    </div>
+  );
+}
+
+function FeatureChip({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <div className="flex h-[50px] items-center gap-3 rounded-[39px] border border-[#3E3E3E] bg-[#16140F] px-4 text-[#5E5E5E]">
+      <div className="grid h-6 w-6 place-items-center text-[#B57F23]">{icon}</div>
+      <span className="text-[10px] leading-[15px]">{label}</span>
+    </div>
+  );
+}
 
 export function SIP1() {
   const navigate = useNavigate();
   const location = useLocation();
   const { state, dispatch } = useGoldFlow();
-  const locationState = location.state as { backgroundLocation?: typeof location } | null;
+  const locationState = location.state as { backgroundLocation?: typeof location; metalType?: string } | null;
   const backgroundLocation = locationState?.backgroundLocation;
+  const metalType = state.sipState.metalType || locationState?.metalType || 'gold';
   const amount = state.sipState.amount ?? 1000;
+  const [sipRate, setSipRate] = useState(state.sipState.rate || 0);
+  const [rateLoading, setRateLoading] = useState(true);
 
   const presets = [500, 1000, 2000, 5000];
+  const isGold = metalType === 'gold';
+
+  useEffect(() => {
+    setRateLoading(true);
+    fetchAugmontSipRates().then((res) => {
+      if (res?.ok) {
+        const rate = isGold ? (res.snapshot?.gold?.buyPrice || 0) : (res.snapshot?.silver?.buyPrice || 0);
+        if (rate > 0) {
+          setSipRate(rate);
+          dispatch({ type: 'SET_SIP_STATE', payload: { rate, metalType } });
+        }
+      }
+    }).finally(() => setRateLoading(false));
+  }, [isGold, dispatch]);
+
+  const approxGrams = sipRate > 0 ? (amount / sipRate).toFixed(4) : '0';
+  const investmentValue = amount * 12;
 
   return (
     <motion.div
@@ -42,7 +84,7 @@ export function SIP1() {
             >
               <ArrowLeft size={24} strokeWidth={1.8} />
             </button>
-            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Gold SIP</h1>
+            <h1 className="text-[16px] font-semibold leading-[24px] text-white">{isGold ? 'Gold SIP' : 'Silver SIP'}</h1>
             <div className="absolute right-0 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full bg-[#3B3935] text-[#15EE01]">
               <ShieldCheck size={12} strokeWidth={2.4} />
             </div>
@@ -51,20 +93,20 @@ export function SIP1() {
           <div className="mt-4 grid grid-cols-3 gap-3">
             <StepRail label="Amount" active />
             <StepRail label="Plan" />
-            <StepRail label="Review" />
+            <StepRail label="Mandate" />
           </div>
 
           <div className="mt-2 pb-1">
             <section className="rounded-[10px] border border-[#E8B438] bg-[linear-gradient(244.67deg,#6C5123_0%,#1E2A28_44.59%)] px-5 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-[12px] leading-[18px] text-[#A1A1A1]">GOLD SIP</div>
+                  <div className="text-[12px] leading-[18px] text-[#A1A1A1]">{isGold ? 'GOLD SIP RATE' : 'SILVER SIP RATE'}</div>
                   <motion.div className="mt-1 text-[14px] font-semibold leading-[21px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
-                    Auto-invest in 24K gold
+                    {rateLoading ? 'Loading...' : sipRate > 0 ? `₹${sipRate.toLocaleString('en-IN')}/g` : 'Unavailable'}
                   </motion.div>
                   <div className="mt-1 flex items-center gap-1 text-[10px] leading-[15px] text-[#0EA300]">
                     <Sparkles size={12} strokeWidth={1.9} />
-                    <span>Start small, grow big</span>
+                    <span>{rateLoading ? 'Fetching SIP rate...' : 'SIP Rate · Augmont'}</span>
                   </div>
                 </div>
                 <div className="mt-1 grid h-[60px] w-[60px] place-items-center rounded-full bg-[radial-gradient(circle_at_35%_30%,#FFE27A_0%,#F5BF31_34%,#C98900_100%)] shadow-[inset_0_0_0_4px_rgba(255,255,255,0.08)]">
@@ -77,11 +119,23 @@ export function SIP1() {
 
             <section className="mt-2 rounded-[20px] border border-[#4E4E4E] bg-[#21211A] px-4 py-3">
               <div className="text-center text-[12px] font-medium leading-[18px] text-[#7E7E7E]">INVESTMENT AMOUNT</div>
-              <div className="mx-auto mt-4 flex h-[40px] w-[200px] items-center justify-center rounded-[20px] border border-[#5E5E5E] bg-[#37372E] text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
-                ₹ {amount.toLocaleString('en-IN')}
+              <div className="mx-auto mt-4 flex h-[40px] w-[200px] items-center justify-center rounded-[20px] border border-[#5E5E5E] bg-[#37372E]">
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="100"
+                  step="100"
+                  value={amount}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!isNaN(v) && v >= 0) dispatch({ type: 'SET_SIP_STATE', payload: { amount: v } });
+                  }}
+                  className="w-[160px] bg-transparent text-center text-[24px] font-semibold leading-[36px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent outline-none"
+                />
               </div>
+              <div className="mt-2 text-center text-[10px] leading-[15px] text-[#7E7E7E]">≈ {approxGrams} g/cycle · ₹{investmentValue.toLocaleString('en-IN')}/yr</div>
 
-              <div className="mt-4 grid grid-cols-4 gap-2">
+              <div className="mt-3 grid grid-cols-4 gap-2">
                 {presets.map((preset) => (
                   <button
                     key={preset}
@@ -97,7 +151,7 @@ export function SIP1() {
 
             <div className="mt-2 grid grid-cols-3 gap-3">
               <FeatureChip icon={<ShieldCheck size={16} strokeWidth={2} />} label="Auto Invest" />
-              <FeatureChip icon={<Coins size={16} strokeWidth={2} />} label="24K Gold" />
+              <FeatureChip icon={<Coins size={16} strokeWidth={2} />} label={isGold ? '24K Gold' : '99.9% Silver'} />
               <FeatureChip icon={<Sparkles size={16} strokeWidth={2} />} label="No Lock-in" />
             </div>
           </div>
@@ -108,10 +162,11 @@ export function SIP1() {
               <motion.button
                 type="button"
                 onClick={() => navigate(Routes.SIP_2, { state: { backgroundLocation } })}
+                disabled={rateLoading || sipRate <= 0 || amount < 100}
                 whileTap={{ scale: 0.98, transition: SpringConfigs.buttonPress }}
-                className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black"
+                className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black disabled:opacity-50"
               >
-                Continue →
+                {rateLoading ? 'Loading SIP rate...' : sipRate <= 0 ? 'Rate unavailable' : 'Continue →'}
               </motion.button>
             </div>
           </div>
@@ -128,15 +183,18 @@ export function SIP2() {
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
 
-  const amount = state.sipState.amount ?? 500;
-  const totalCycles = 6;
-  const totalInvested = amount * totalCycles;
-  const pricePerGram = 7421.5;
-  const estimatedGold = (totalInvested / pricePerGram).toFixed(3);
-  const returns = Math.round(totalInvested * 0.124);
-  const projectedValue = totalInvested + returns;
+  const amount = state.sipState.amount ?? 1000;
+  const frequencies = ['Monthly', 'Weekly', 'Quarterly'];
   const frequency = state.sipState.frequency || 'Monthly';
   const debitDate = state.sipState.date || 5;
+  const cycles = state.sipState.cycles || 12;
+
+  const cycleMultiplier = frequency === 'Weekly' ? 52 : frequency === 'Quarterly' ? 4 : 12;
+  const totalInvested = amount * cycles;
+
+  useEffect(() => {
+    if (!state.sipState.frequency) dispatch({ type: 'SET_SIP_STATE', payload: { frequency: 'Monthly', date: 5, cycles: 12 } });
+  }, []);
 
   return (
     <motion.div
@@ -163,7 +221,7 @@ export function SIP2() {
             >
               <ArrowLeft size={24} strokeWidth={1.8} />
             </button>
-            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Review Plan</h1>
+            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Plan Details</h1>
             <div className="absolute right-0 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full bg-[#3B3935] text-[#15EE01]">
               <ShieldCheck size={12} strokeWidth={2.4} />
             </div>
@@ -177,46 +235,74 @@ export function SIP2() {
 
           <div className="mt-2 pb-1">
             <section className="rounded-[20px] bg-[#302916] px-6 py-6 text-center">
-              <div className="text-[12px] font-medium leading-[18px] text-[#7E7E7E]">PROJECTED VALUE IN 6 MONTHS</div>
+              <div className="text-[12px] font-medium leading-[18px] text-[#7E7E7E]">TOTAL INVESTMENT</div>
               <div className="mt-3 text-[32px] font-semibold leading-[48px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
-                ₹{projectedValue.toLocaleString('en-IN')}
+                ₹{totalInvested.toLocaleString('en-IN')}
               </div>
-              <div className="mt-1 text-[12px] font-medium leading-[18px] text-[#15EE01]">+₹{returns} returns</div>
-
-              <div className="relative mx-auto mt-6 h-[54px] w-[270px]">
-                <div className="absolute inset-0 rounded-[80px] border-3 border-[#F8CF59] bg-[#F8CF59]" />
-              </div>
+              <div className="mt-1 text-[12px] font-medium leading-[18px] text-[#7E7E7E]">₹{amount.toLocaleString('en-IN')}/cycle · {cycles} cycles</div>
             </section>
 
             <section className="mt-2 rounded-[20px] border border-[#3E3E3E] bg-[#1A1912] px-6 py-5">
-              <div className="space-y-3 text-[12px] leading-[18px]">
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Investment Per Cycle</span>
-                  <span className="font-semibold text-white">₹{amount.toLocaleString('en-IN')}</span>
+              <div className="space-y-4">
+                <div>
+                  <div className="text-[10px] leading-[12px] text-[#7E7E7E]">FREQUENCY</div>
+                  <div className="mt-2 flex gap-2">
+                    {frequencies.map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => dispatch({ type: 'SET_SIP_STATE', payload: { frequency: f } })}
+                        className={`h-[30px] flex-1 rounded-[20px] border text-[12px] leading-[18px] ${frequency === f ? 'border-[#F8CF59] bg-[#302715] text-[#F8CF59]' : 'border-[#3E3E3E] bg-[#0F1416] text-[#7E7E7E]'}`}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Frequency</span>
-                  <span className="font-semibold text-white">{frequency}</span>
+
+                <div>
+                  <div className="text-[10px] leading-[12px] text-[#7E7E7E]">DEBIT DAY</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {frequency === 'Weekly' ? (
+                      ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map((d, i) => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => dispatch({ type: 'SET_SIP_STATE', payload: { date: i + 1 } })}
+                          className={`h-[30px] rounded-[20px] border px-3 text-[12px] leading-[18px] ${debitDate === i + 1 ? 'border-[#F8CF59] bg-[#302715] text-[#F8CF59]' : 'border-[#3E3E3E] bg-[#0F1416] text-[#7E7E7E]'}`}
+                        >
+                          {d}
+                        </button>
+                      ))
+                    ) : (
+                      [1, 5, 10, 15, 20, 25].map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => dispatch({ type: 'SET_SIP_STATE', payload: { date: d } })}
+                          className={`h-[30px] rounded-[20px] border px-3 text-[12px] leading-[18px] ${debitDate === d ? 'border-[#F8CF59] bg-[#302715] text-[#F8CF59]' : 'border-[#3E3E3E] bg-[#0F1416] text-[#7E7E7E]'}`}
+                        >
+                          {d}th
+                        </button>
+                      ))
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Debit day</span>
-                  <span className="font-semibold text-white">{debitDate}th every month</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Total Cycles</span>
-                  <span className="font-semibold text-white">{totalCycles}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Total Invested</span>
-                  <span className="font-semibold text-white">₹{totalInvested.toLocaleString('en-IN')}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[#7E7E7E]">Estimated Gold</span>
-                  <span className="font-semibold text-white">{estimatedGold}g</span>
-                </div>
-                <div className="flex items-center justify-between border-t border-[#3E3E3E] pt-3 text-[14px] leading-[21px] font-semibold">
-                  <span className="text-white">Projected Value</span>
-                  <span className="text-[#F8CF59]">₹{projectedValue.toLocaleString('en-IN')}</span>
+
+                <div>
+                  <div className="text-[10px] leading-[12px] text-[#7E7E7E]">DURATION</div>
+                  <div className="mt-2 flex gap-2">
+                    {[3, 6, 12, 24].map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => dispatch({ type: 'SET_SIP_STATE', payload: { cycles: c } })}
+                        className={`h-[30px] flex-1 rounded-[20px] border text-[12px] leading-[18px] ${cycles === c ? 'border-[#F8CF59] bg-[#302715] text-[#F8CF59]' : 'border-[#3E3E3E] bg-[#0F1416] text-[#7E7E7E]'}`}
+                      >
+                        {c} {frequency === 'Weekly' ? 'weeks' : frequency === 'Quarterly' ? 'quarters' : 'months'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </section>
@@ -231,7 +317,7 @@ export function SIP2() {
                 whileTap={{ scale: 0.98, transition: SpringConfigs.buttonPress }}
                 className="h-10 w-full rounded-[50px] bg-[linear-gradient(90deg,#F7CD57_0%,#E5AF35_50.96%,#B57F23_100%)] text-[16px] font-medium leading-[19px] text-black"
               >
-                Set Auto Debit →
+                Continue →
               </motion.button>
             </div>
           </div>
@@ -247,14 +333,20 @@ export function SIP3() {
   const { state, dispatch } = useGoldFlow();
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
-  const amount = state.sipState.amount ?? 500;
-  const totalInvested = amount * 6;
-  const pricePerGram = 7421.5;
-  const estimatedGold = (totalInvested / pricePerGram).toFixed(3);
-  const returns = Math.round(totalInvested * 0.124);
-  const projectedValue = totalInvested + returns;
+
+  const amount = state.sipState.amount ?? 1000;
+  const sipRate = state.sipState.rate || 0;
   const frequency = state.sipState.frequency || 'Monthly';
   const debitDate = state.sipState.date || 5;
+  const cycles = state.sipState.cycles || 12;
+  const totalInvested = amount * cycles;
+  const estimatedGold = sipRate > 0 ? (totalInvested / sipRate).toFixed(3) : '0';
+  const returns = Math.round(totalInvested * 0.12);
+  const projectedValue = totalInvested + returns;
+
+  const debitLabel = frequency === 'Weekly'
+    ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][(debitDate || 1) - 1] || 'Mon'
+    : `${debitDate}th`;
 
   return (
     <motion.div
@@ -281,7 +373,7 @@ export function SIP3() {
             >
               <ArrowLeft size={24} strokeWidth={1.8} />
             </button>
-            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Set Auto Debit</h1>
+            <h1 className="text-[16px] font-semibold leading-[24px] text-white">Review & Confirm</h1>
             <div className="absolute right-0 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full bg-[#3B3935] text-[#15EE01]">
               <ShieldCheck size={12} strokeWidth={2.4} />
             </div>
@@ -294,15 +386,49 @@ export function SIP3() {
           </div>
 
           <div className="mt-2 pb-1">
-            <section className="rounded-[20px] border border-[#3E3522] bg-[#302715] px-6 py-6 text-center">
-              <div className="mx-auto mb-4 grid h-[80px] w-[80px] place-items-center rounded-full bg-[radial-gradient(circle_at_35%_30%,#FFE27A_0%,#F5BF31_34%,#C98900_100%)] shadow-[inset_0_0_0_4px_rgba(255,255,255,0.08)]">
-                <div className="grid h-[66px] w-[66px] place-items-center rounded-full border border-[#E8B438]/40 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.18),transparent_35%),linear-gradient(180deg,#F8D862_0%,#D59B12_100%)] text-[14px] font-semibold tracking-[0.08em] text-[#C89111]">
-                  SIP
+            <section className="rounded-[20px] bg-[#302916] px-6 py-6 text-center">
+              <div className="text-[12px] font-medium leading-[18px] text-[#7E7E7E]">PROJECTED VALUE</div>
+              <div className="mt-3 text-[32px] font-semibold leading-[48px] bg-[linear-gradient(180deg,#F7CD57_22.28%,#917833_100%)] bg-clip-text text-transparent">
+                ₹{projectedValue.toLocaleString('en-IN')}
+              </div>
+              <div className="mt-1 text-[12px] font-medium leading-[18px] text-[#15EE01]">+₹{returns.toLocaleString('en-IN')} estimated returns</div>
+            </section>
+
+            <section className="mt-2 rounded-[20px] border border-[#3E3E3E] bg-[#1A1912] px-6 py-5">
+              <div className="space-y-3 text-[12px] leading-[18px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">SIP Rate</span>
+                  <span className="font-semibold text-white">{sipRate > 0 ? `₹${sipRate.toLocaleString('en-IN')}/g` : '---'}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Investment Per Cycle</span>
+                  <span className="font-semibold text-white">₹{amount.toLocaleString('en-IN')}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Frequency</span>
+                  <span className="font-semibold text-white">{frequency}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Debit day</span>
+                  <span className="font-semibold text-white">{debitLabel}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Total Cycles</span>
+                  <span className="font-semibold text-white">{cycles}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Total Invested</span>
+                  <span className="font-semibold text-white">₹{totalInvested.toLocaleString('en-IN')}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#7E7E7E]">Est. Gold Accumulated</span>
+                  <span className="font-semibold text-white">{estimatedGold}g</span>
+                </div>
+                <div className="flex items-center justify-between border-t border-[#3E3E3E] pt-3 text-[14px] leading-[21px] font-semibold">
+                  <span className="text-white">Projected Value</span>
+                  <span className="text-[#F8CF59]">₹{projectedValue.toLocaleString('en-IN')}</span>
                 </div>
               </div>
-              <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[#8D8B87]">SIP SUMMARY</div>
-              <div className="mt-2 text-[12px] leading-[18px] text-[#7E7E7E]">₹{amount.toLocaleString('en-IN')} · {frequency} · {debitDate}th</div>
-              <div className="mt-1 text-[14px] font-semibold leading-[21px] text-[#F7CD57]">Projected: ₹{projectedValue.toLocaleString('en-IN')}</div>
             </section>
 
             <section className="mt-2 flex items-center gap-4 rounded-[20px] border border-[#3D3A2F] bg-[#211D12] px-4 py-4">
@@ -314,14 +440,6 @@ export function SIP3() {
                 <div className="mt-1 text-[10px] leading-[12px] text-[#8D8B87]">Set up UPI AutoPay. Amount auto-debited every {frequency.toLowerCase()}.</div>
               </div>
             </section>
-
-            <div className="mt-2 flex items-center gap-2 rounded-[40px] border border-[#2E2E2E] bg-[#201B0F] px-3 py-2 text-[10px] leading-[15px] text-[#7E7E7E]">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <rect x="4" y="11" width="16" height="10" rx="2" stroke="#15EE01" strokeWidth="1.5" />
-                <path d="M8 11V7C8 4.8 9.8 3 12 3C14.2 3 16 4.8 16 7V11" stroke="#15EE01" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-              <span>256-bit encrypted · BIS verified platform</span>
-            </div>
           </div>
 
           <div className="mt-1 shrink-0">
@@ -346,14 +464,80 @@ export function SIP3() {
 export function SIP4() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { state } = useGoldFlow();
+  const { state, dispatch } = useGoldFlow();
+  const { toast } = useToast();
+  const [statusMsg, setStatusMsg] = useState('Setting up SIP mandate...');
   const locationState = location.state as { backgroundLocation?: typeof location } | null;
   const backgroundLocation = locationState?.backgroundLocation;
 
+  const amount = state.sipState.amount ?? 0;
+  const sipRate = state.sipState.rate || 0;
+  const metalType = state.sipState.metalType || 'gold';
+
+  const resolveUniqueId = useCallback(() => {
+    const profile = getUserProfile() || {};
+    const augmontUser = getAugmontUser() || {};
+    const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
+    const dateOfBirth = String(profile?.dateOfBirth || profile?.dob || augmontUser?.dateOfBirth || '');
+    return augmontUser?.uniqueId || profile?.uniqueId || profile?.augmontUniqueId || buildMobileDobUniqueId({ mobileNumber, dateOfBirth }) || '';
+  }, []);
+
   useEffect(() => {
-    const timer = setTimeout(() => navigate(Routes.SIP_5, { replace: true, state: { backgroundLocation } }), AutoAdvanceDelays.SIP_4);
-    return () => clearTimeout(timer);
-  }, [backgroundLocation, navigate]);
+    let cancelled = false;
+    const registerSip = async () => {
+      const uniqueId = state.sipState.uniqueId || resolveUniqueId();
+      if (!uniqueId) {
+        toast({ variant: 'destructive', title: 'Error', description: 'User session not found. Please login again.' });
+        navigate(backgroundLocation?.pathname || Routes.DASHBOARD, { replace: true });
+        return;
+      }
+      dispatch({ type: 'SET_SIP_STATE', payload: { uniqueId } });
+
+      setStatusMsg('Fetching live rate...');
+      const rateRes = await fetchLiveGoldRateSnapshot({ force: true });
+      if (cancelled) return;
+      const liveBuyPrice = metalType === 'silver'
+        ? (rateRes?.snapshot?.silver?.buyPrice || rateRes?.snapshot?.silver?.currentPrice || 0)
+        : (rateRes?.snapshot?.buyPrice || 0);
+      const liveBlockId = rateRes.blockId || rateRes.snapshot.blockId || '';
+      if (!rateRes?.ok || !liveBuyPrice) {
+        toast({ variant: 'destructive', title: 'Rate Error', description: rateRes?.message || 'Failed to fetch live rate.' });
+        navigate(Routes.SIP_1, { replace: true, state: { backgroundLocation } });
+        return;
+      }
+
+      setStatusMsg('Placing first cycle order...');
+      const merchantTransactionId = `KTL-SIP-${Date.now()}`;
+      const res = await createAugmontBuyOrder({
+        request: {
+          merchantTransactionId,
+          uniqueId,
+          lockPrice: liveBuyPrice.toFixed(2),
+          metalType,
+          amount: amount.toFixed(2),
+          modeOfPayment: 'wallet',
+          blockId: liveBlockId,
+        }
+      });
+
+      if (cancelled) return;
+
+      if (res?.ok) {
+        const orderResult = {
+          transactionId: (res?.order as Record<string, unknown>)?.transactionId as string || merchantTransactionId,
+          merchantTransactionId,
+        };
+        dispatch({ type: 'SET_SIP_STATE', payload: orderResult });
+        navigate(Routes.SIP_5, { replace: true, state: { backgroundLocation } });
+      } else {
+        toast({ variant: 'destructive', title: 'SIP Registration Failed', description: res?.message || 'Unable to place first cycle order.' });
+        navigate(backgroundLocation?.pathname || Routes.DASHBOARD, { replace: true });
+      }
+    };
+
+    registerSip();
+    return () => { cancelled = true; };
+  }, []);
 
   return (
     <motion.div
@@ -384,9 +568,9 @@ export function SIP4() {
           </div>
 
           <div className="flex flex-col items-center justify-center py-12">
-            <LoadingScreen text="Registering SIP Mandate..." />
+            <LoadingScreen text={statusMsg} />
           </div>
-          <div className="pb-1 text-center text-[12px] leading-[18px] text-[#7E7E7E]">Setting up your recurring investment plan</div>
+          <div className="pb-1 text-center text-[12px] leading-[18px] text-[#7E7E7E]">{statusMsg}</div>
         </div>
       </motion.section>
     </motion.div>
@@ -401,7 +585,15 @@ export function SIP5() {
   const backgroundLocation = locationState?.backgroundLocation;
 
   const amount = state.sipState.amount ?? 1000;
-  const totalInvested = amount * 12;
+  const frequency = state.sipState.frequency || 'Monthly';
+  const debitDate = state.sipState.date || 5;
+  const cycles = state.sipState.cycles || 12;
+  const totalInvested = amount * cycles;
+  const transactionId = state.sipState.transactionId || '';
+
+  const debitLabel = frequency === 'Weekly'
+    ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'][(debitDate || 1) - 1] || 'Mon'
+    : `${debitDate}th`;
 
   return (
     <motion.div
@@ -442,7 +634,7 @@ export function SIP5() {
                 </div>
               </div>
               <div className="text-[16px] font-semibold text-white">SIP Activated!</div>
-              <div className="mt-2 text-[12px] leading-[18px] text-[#7E7E7E]">Your {state.sipState.frequency?.toLowerCase() || 'monthly'} SIP of ₹{amount.toLocaleString('en-IN')} is now active</div>
+              <div className="mt-2 text-[12px] leading-[18px] text-[#7E7E7E]">Your {frequency.toLowerCase()} SIP of ₹{amount.toLocaleString('en-IN')} is now active</div>
             </section>
 
             <section className="mt-4 rounded-[30px] border border-[#444135] bg-[#191812] px-6 py-6">
@@ -453,15 +645,23 @@ export function SIP5() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Frequency</span>
-                  <span className="font-semibold text-white">{state.sipState.frequency || 'Monthly'}</span>
+                  <span className="font-semibold text-white">{frequency}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Debit Day</span>
-                  <span className="font-semibold text-white">{state.sipState.date || 5}th every month</span>
+                  <span className="font-semibold text-white">{debitLabel}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span>Yearly Investment</span>
+                  <span>Total Cycles</span>
+                  <span className="font-semibold text-white">{cycles}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Total Investment</span>
                   <span className="font-semibold text-[#F7CD57]">₹{totalInvested.toLocaleString('en-IN')}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Order ID</span>
+                  <span className="font-semibold text-white">#{transactionId ? transactionId.slice(0, 12) : '---'}</span>
                 </div>
                 <div className="flex items-center justify-between border-t border-[#33312A] pt-4 text-[18px] font-semibold">
                   <span className="text-white">Status</span>
@@ -495,23 +695,5 @@ export function SIP5() {
         </div>
       </motion.section>
     </motion.div>
-  );
-}
-
-function StepRail({ label, active }: { label: string; active?: boolean }) {
-  return (
-    <div className="relative">
-      <div className={`h-[5px] rounded-full ${active ? 'bg-[linear-gradient(90deg,#FFE9AA_0%,#F7CD57_50%,#CA9B14_100%)]' : 'bg-[#3E3E3E]'}`} />
-      <div className={`mt-1 text-[12px] leading-[18px] ${active ? 'text-[#F7CD57]' : 'text-[#515151]'}`}>{label}</div>
-    </div>
-  );
-}
-
-function FeatureChip({ icon, label }: { icon: React.ReactNode; label: string }) {
-  return (
-    <div className="flex h-[50px] items-center gap-3 rounded-[39px] border border-[#3E3E3E] bg-[#16140F] px-4 text-[#5E5E5E]">
-      <div className="grid h-6 w-6 place-items-center text-[#B57F23]">{icon}</div>
-      <span className="text-[10px] leading-[15px]">{label}</span>
-    </div>
   );
 }

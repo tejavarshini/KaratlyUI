@@ -54,6 +54,7 @@ const getDateRange = () => {
 export function Home() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { state: authState } = useAuth();
   const [metalType, setMetalType] = useState("gold");
   const [chartData, setChartData] = useState<Array<{ date: string; buyRate: number; sellRate: number; label: string; price: number }>>([]);
   const [liveRates, setLiveRates] = useState({
@@ -91,6 +92,7 @@ export function Home() {
   }, [loadRates]);
 
   useEffect(() => {
+    if (authState.loading) return;
     const profile = getUserProfile() || {};
     const augmontUser = getAugmontUser() || {};
     const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
@@ -115,7 +117,7 @@ export function Home() {
         setTotalInvested(total);
       }
     }).catch(() => {});
-  }, []);
+  }, [authState.loading]);
 
   const metalLabel = metalType === 'gold' ? 'Gold' : 'Silver';
   const quickActions = [
@@ -500,6 +502,7 @@ export function Home() {
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { state: authState } = useAuth();
   const [goldBalance, setGoldBalance] = useState(0);
   const [buyPrice, setBuyPrice] = useState(0);
   const [sellPrice, setSellPrice] = useState(0);
@@ -507,6 +510,7 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (authState.loading) return;
     const profile = getUserProfile() || {};
     const augmontUser = getAugmontUser() || {};
     const mobileNumber = String(profile?.mobileNumber || augmontUser?.mobileNumber || '').replace(/\D/g, '').slice(-10);
@@ -537,7 +541,7 @@ export function Dashboard() {
         setTotalInvested(total);
       }
     }).finally(() => setLoading(false));
-  }, []);
+  }, [authState.loading]);
 
   const portfolioValue = goldBalance * buyPrice;
   const profit = portfolioValue - totalInvested;

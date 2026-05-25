@@ -12,6 +12,7 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 const basePath = process.env.BASE_PATH ?? "/";
+const isCapacitor = process.env.CAPACITOR_BUILD === 'true';
 
 export default defineConfig(async () => {
   const plugins = [react(), tailwindcss()];
@@ -48,7 +49,7 @@ export default defineConfig(async () => {
   }
 
   return {
-    base: basePath,
+    base: isCapacitor ? './' : basePath,
     plugins,
     resolve: {
       alias: {

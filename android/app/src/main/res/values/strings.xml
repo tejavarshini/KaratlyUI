@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Karatly</string>
+    <string name="title_activity_main">Karatly</string>
+    <string name="package_name">com.karatly.app</string>
+    <string name="custom_url_scheme">com.karatly.app</string>
+</resources>
